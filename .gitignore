@@ -36,5 +36,5 @@ htmlcov/
 # Local debug/output artifacts
 debug-fetch/
 debug_fetched.md
-test_output.md
-test_output_url.md
+
+documents/
