@@ -1,0 +1,40 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Packaging
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.cache/
+.coverage
+htmlcov/
+
+# Environment files
+.env
+.env.*
+
+# Editor settings
+.vscode/
+
+# Tooling metadata
+.sisyphus/
+
+# Local debug/output artifacts
+debug-fetch/
+debug_fetched.md
+test_output.md
+test_output_url.md
