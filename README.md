@@ -26,6 +26,8 @@ export JINA_API_KEY="your-jina-api-key"
 # Or use a .env file
 # MOONSHOT_API_KEY=your-kimi-api-key
 # JINA_API_KEY=your-jina-api-key
+# MOONSHOT_MODEL=kimi-k2-0905-preview
+# MOONSHOT_BASE_URL=https://api.moonshot.cn/v1
 
 The CLI loads `.env` automatically on all platforms before reading env vars.
 ```
@@ -50,6 +52,21 @@ cd src
 python -m translator translate-url \
   --url https://cs231n.github.io/neural-networks-1/ \
   --out ../translated_note.md
+```
+
+### Batch Translate from URL Lists
+
+```bash
+cd src
+python -m translator translate-url-batch \
+  --url-list ../url.txt \
+  --out-dir ../translated_urls
+
+# Multiple url list files
+python -m translator translate-url-batch \
+  --url-list ../url.txt \
+  --url-list ../more-urls.txt \
+  --out-dir ../translated_urls
 ```
 
 ### Debug Commands
@@ -78,6 +95,13 @@ python -m translator debug-fetch \
   --url https://example.com \
   --out fetched.md
 ```
+
+## Viewing Snapdown Diagrams
+
+`translate-url` automatically converts Snapdown (`snapdown`) diagram blocks into Mermaid (`mermaid`) blocks in the generated Markdown (enabled by default).
+In VS Code, Mermaid often renders in the built-in Markdown preview; if not, install the "Markdown Preview Mermaid Support" extension.
+To export rendered diagrams to PDF, use "Markdown PDF" or "Markdown Preview Enhanced".
+To keep Snapdown blocks unchanged, pass `--no-snapdown-mermaid` to `translate-url` (and `translate-url-batch`).
 
 ## Output Structure
 
@@ -146,7 +170,9 @@ translator/
 ### LLM Settings
 
 - **Model**: `kimi-k2-0905-preview`
+- **Model Env**: `MOONSHOT_MODEL` (optional override)
 - **Base URL**: `https://api.moonshot.cn/v1`
+- **Base URL Env**: `MOONSHOT_BASE_URL` (optional override)
 - **API Key**: `MOONSHOT_API_KEY` environment variable
 - **Temperature**: 0.2-0.4 (configurable)
 - **Timeout**: 60s (configurable)

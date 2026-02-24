@@ -7,10 +7,16 @@ from typing import Callable, Dict, List, Optional, Sequence, cast
 
 from .chunking import build_chunk_plan
 from .llm_client import KimiClient
+from .snapdown_converter import convert_snapdown_to_mermaid
 from .step1_profile import profile as profile_step1
 from .step2_translate import ChunkTranslation, translate_chunks
 
-from .jina_reader_fetcher import JinaReaderConfig, fetch_markdown
+from .jina_reader_fetcher import (
+    JinaReaderConfig,
+    fetch_markdown,
+    fetch_snapdown_blocks,
+    insert_snapdown_blocks,
+)
 
 
 class PipelineError(RuntimeError):
@@ -26,6 +32,7 @@ def translate_document(
     concurrency: int = 3,
     timeout_seconds: Optional[float] = None,
     title_hint: Optional[str] = None,
+    snapdown_to_mermaid: bool = True,
     client: Optional[KimiClient] = None,
     write_text: Optional[Callable[[str, str], None]] = None,
 ) -> str:
@@ -34,14 +41,15 @@ def translate_document(
     if not source_value:
         raise PipelineError("source_value is required")
 
+    llm_client = client or KimiClient()
     content = _read_source(
         source_type=source_type,
         source_value=source_value,
         timeout_seconds=timeout_seconds,
+        client=llm_client,
+        snapdown_to_mermaid=snapdown_to_mermaid,
     )
     content = _clean_jina_artifacts(content)
-
-    llm_client = client or KimiClient()
     model_id = cast(str, getattr(llm_client, "_model", "unknown"))
 
     profile_payload, _ = profile_step1(
@@ -86,12 +94,21 @@ def _read_source(
     source_type: str,
     source_value: str,
     timeout_seconds: Optional[float],
+    client: Optional[KimiClient] = None,
+    snapdown_to_mermaid: bool = True,
 ) -> str:
     if source_type == "url":
         config = None
         if timeout_seconds is not None:
             config = JinaReaderConfig(timeout_seconds=int(timeout_seconds))
-        return fetch_markdown(source_value, config=config)
+        content = fetch_markdown(source_value, config=config)
+        snapdown_blocks = fetch_snapdown_blocks(source_value, config=config)
+        snapdown_blocks = (
+            convert_snapdown_to_mermaid(snapdown_blocks, client)
+            if client and snapdown_to_mermaid
+            else snapdown_blocks
+        )
+        return insert_snapdown_blocks(content, snapdown_blocks)
 
     if not os.path.exists(source_value):
         raise PipelineError(f"input file not found: {source_value}")

@@ -1,9 +1,11 @@
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
-from typing import Callable, Dict, List, Optional, Sequence, cast
+from typing import Callable, Dict, List, Optional, Sequence, Set, cast
+from urllib.parse import unquote, urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -26,6 +28,66 @@ def read_text(path: str) -> str:
         raise ValueError(f"input path is not a file: {path}")
     with open(path, "r", encoding="utf-8") as handle:
         return handle.read()
+
+
+def _read_url_list(path: str) -> List[str]:
+    content = read_text(path)
+    urls: List[str] = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        urls.append(stripped)
+    if not urls:
+        raise ValueError(f"no URLs found in: {path}")
+    return urls
+
+
+def _collect_url_lists(paths: Sequence[str]) -> List[str]:
+    urls: List[str] = []
+    for path in paths:
+        urls.extend(_read_url_list(path))
+    if not urls:
+        raise ValueError("no URLs provided")
+    return urls
+
+
+def _slugify_url(url: str) -> str:
+    parsed = urlparse(url)
+    host = parsed.netloc or ""
+    path = parsed.path or ""
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    raw = f"{host}{path}" if host or path else url
+    raw = unquote(raw).strip().strip("/")
+    if not raw:
+        raw = host or "url"
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", raw).strip("-").lower()
+    if not slug:
+        slug = "url"
+    return slug[:120].strip("-") or "url"
+
+
+def _build_batch_out_path(
+    out_dir: str, url: str, index: int, used_names: Set[str]
+) -> str:
+    slug = _slugify_url(url)
+    name = f"{index:03d}-{slug}.md"
+    if name in used_names:
+        counter = 2
+        while name in used_names:
+            name = f"{index:03d}-{slug}-{counter}.md"
+            counter += 1
+    used_names.add(name)
+    return os.path.join(out_dir, name)
+
+
+def _require_out_dir(out_dir: str) -> str:
+    if not out_dir:
+        raise ValueError("output directory is required")
+    if not os.path.isdir(out_dir):
+        raise FileNotFoundError(f"output directory does not exist: {out_dir}")
+    return out_dir
 
 
 def atomic_write_text(out_path: str, content: str) -> None:
@@ -80,6 +142,7 @@ def cmd_translate_url(args: argparse.Namespace) -> int:
     timeout = float(cast(float, args.timeout))
     max_chunk_chars = int(cast(int, args.max_chunk_chars))
     concurrency = int(cast(int, args.concurrency))
+    snapdown_to_mermaid = not bool(cast(bool, args.no_snapdown_mermaid))
     if jina_api_key_env:
         api_key = os.environ.get(jina_api_key_env)
         if not api_key:
@@ -95,8 +158,53 @@ def cmd_translate_url(args: argparse.Namespace) -> int:
         max_chunk_chars=max_chunk_chars,
         concurrency=concurrency,
         timeout_seconds=timeout,
+        snapdown_to_mermaid=snapdown_to_mermaid,
         write_text=atomic_write_text,
     )
+    return 0
+
+
+def cmd_translate_url_batch(args: argparse.Namespace) -> int:
+    url_list = cast(Sequence[str], args.url_list)
+    out_dir = cast(str, args.out_dir)
+    jina_api_key_env = cast(Optional[str], args.jina_api_key_env)
+    timeout = float(cast(float, args.timeout))
+    max_chunk_chars = int(cast(int, args.max_chunk_chars))
+    concurrency = int(cast(int, args.concurrency))
+    snapdown_to_mermaid = not bool(cast(bool, args.no_snapdown_mermaid))
+    if jina_api_key_env:
+        api_key = os.environ.get(jina_api_key_env)
+        if not api_key:
+            raise ValueError(f"missing API key in env var: {jina_api_key_env}")
+        os.environ["JINA_API_KEY"] = api_key
+
+    urls = _collect_url_lists(url_list)
+    out_dir = _require_out_dir(out_dir)
+
+    from .pipeline import translate_document
+
+    used_names: Set[str] = set()
+    failures: List[str] = []
+    for index, url in enumerate(urls, start=1):
+        out_path = _build_batch_out_path(out_dir, url, index, used_names)
+        try:
+            _ = translate_document(
+                source_type="url",
+                source_value=url,
+                out_path=out_path,
+                max_chunk_chars=max_chunk_chars,
+                concurrency=concurrency,
+                timeout_seconds=timeout,
+                snapdown_to_mermaid=snapdown_to_mermaid,
+                write_text=atomic_write_text,
+            )
+        except Exception as exc:
+            failures.append(f"{url} -> {out_path}: {exc}")
+
+    if failures:
+        for line in failures:
+            print(f"error: {line}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -262,8 +370,18 @@ def build_parser() -> argparse.ArgumentParser:
     translate_url = subparsers.add_parser("translate-url")
     _ = translate_url.add_argument("--url", required=True)
     _ = translate_url.add_argument("--out", required=True)
+    _ = translate_url.add_argument("--no-snapdown-mermaid", action="store_true")
     add_common_options(translate_url)
     translate_url.set_defaults(func=cmd_translate_url)
+
+    translate_url_batch = subparsers.add_parser("translate-url-batch")
+    _ = translate_url_batch.add_argument(
+        "--url-list", "--url-file", dest="url_list", action="append", required=True
+    )
+    _ = translate_url_batch.add_argument("--out-dir", required=True)
+    _ = translate_url_batch.add_argument("--no-snapdown-mermaid", action="store_true")
+    add_common_options(translate_url_batch)
+    translate_url_batch.set_defaults(func=cmd_translate_url_batch)
 
     translate_md = subparsers.add_parser("translate-md")
     _ = translate_md.add_argument("--in", dest="input_path", required=True)
