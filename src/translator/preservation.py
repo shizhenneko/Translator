@@ -16,7 +16,7 @@ class PreservationError(RuntimeError):
     pass
 
 
-_PLACEHOLDER_RE = re.compile(r"__([A-Z_]+)_[0-9]{3}__")
+_PLACEHOLDER_RE = re.compile(r"(?<![_A-Za-z0-9])__([A-Z][A-Z_]*)_[0-9]{3}__")
 _FENCE_START_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 _FENCE_LINE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})", re.MULTILINE)
 _BEGIN_MATH_RE = re.compile(r"\\begin\{([^\}]+)\}")
@@ -437,6 +437,11 @@ def _find_inline_code_spans(text: str) -> List[ProtectedSpan]:
         while search < len(text):
             if text[search] == "`" and not _is_escaped(text, search):
                 if _count_run(text, search, "`") == tick_count:
+                    candidate = text[start : search + tick_count]
+                    if _PLACEHOLDER_RE.search(candidate):
+                        # Reject: span would swallow an earlier placeholder.
+                        index = start + tick_count
+                        break
                     spans.append(
                         ProtectedSpan(start, search + tick_count, "INLINE_CODE")
                     )
@@ -444,8 +449,13 @@ def _find_inline_code_spans(text: str) -> List[ProtectedSpan]:
                     break
             search += 1
         else:
-            spans.append(ProtectedSpan(start, len(text), "INLINE_CODE"))
-            index = len(text)
+            candidate = text[start:]
+            if _PLACEHOLDER_RE.search(candidate):
+                # Reject: unclosed span would swallow an earlier placeholder.
+                index = start + tick_count
+            else:
+                spans.append(ProtectedSpan(start, len(text), "INLINE_CODE"))
+                index = len(text)
     return spans
 
 

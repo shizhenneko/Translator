@@ -133,6 +133,18 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
     _ = parser.add_argument("--timeout", type=float, default=30.0)
     _ = parser.add_argument("--max-chunk-chars", type=int, default=8000)
     _ = parser.add_argument("--concurrency", type=int, default=1)
+    _ = parser.add_argument(
+        "--prompt-outline-mode",
+        choices=["headings", "full"],
+        default="headings",
+        help="Outline rendering mode: 'headings' (slim) or 'full' (legacy with summaries)",
+    )
+    _ = parser.add_argument(
+        "--prompt-glossary-mode",
+        choices=["filtered", "full"],
+        default="filtered",
+        help="Glossary mode: 'filtered' (chunk-relevant terms only) or 'full' (all terms)",
+    )
 
 
 def cmd_translate_url(args: argparse.Namespace) -> int:
@@ -143,6 +155,8 @@ def cmd_translate_url(args: argparse.Namespace) -> int:
     max_chunk_chars = int(cast(int, args.max_chunk_chars))
     concurrency = int(cast(int, args.concurrency))
     snapdown_to_mermaid = not bool(cast(bool, args.no_snapdown_mermaid))
+    prompt_outline_mode = cast(str, args.prompt_outline_mode)
+    prompt_glossary_mode = cast(str, args.prompt_glossary_mode)
     if jina_api_key_env:
         api_key = os.environ.get(jina_api_key_env)
         if not api_key:
@@ -159,6 +173,8 @@ def cmd_translate_url(args: argparse.Namespace) -> int:
         concurrency=concurrency,
         timeout_seconds=timeout,
         snapdown_to_mermaid=snapdown_to_mermaid,
+        prompt_outline_mode=prompt_outline_mode,
+        prompt_glossary_mode=prompt_glossary_mode,
         write_text=atomic_write_text,
     )
     return 0
@@ -172,6 +188,8 @@ def cmd_translate_url_batch(args: argparse.Namespace) -> int:
     max_chunk_chars = int(cast(int, args.max_chunk_chars))
     concurrency = int(cast(int, args.concurrency))
     snapdown_to_mermaid = not bool(cast(bool, args.no_snapdown_mermaid))
+    prompt_outline_mode = cast(str, args.prompt_outline_mode)
+    prompt_glossary_mode = cast(str, args.prompt_glossary_mode)
     if jina_api_key_env:
         api_key = os.environ.get(jina_api_key_env)
         if not api_key:
@@ -196,6 +214,8 @@ def cmd_translate_url_batch(args: argparse.Namespace) -> int:
                 concurrency=concurrency,
                 timeout_seconds=timeout,
                 snapdown_to_mermaid=snapdown_to_mermaid,
+                prompt_outline_mode=prompt_outline_mode,
+                prompt_glossary_mode=prompt_glossary_mode,
                 write_text=atomic_write_text,
             )
         except Exception as exc:
@@ -213,6 +233,8 @@ def cmd_translate_md(args: argparse.Namespace) -> int:
     out_path = cast(str, args.out)
     max_chunk_chars = int(cast(int, args.max_chunk_chars))
     concurrency = int(cast(int, args.concurrency))
+    prompt_outline_mode = cast(str, args.prompt_outline_mode)
+    prompt_glossary_mode = cast(str, args.prompt_glossary_mode)
     title_hint = os.path.basename(input_path)
 
     from .pipeline import translate_document
@@ -224,6 +246,8 @@ def cmd_translate_md(args: argparse.Namespace) -> int:
         max_chunk_chars=max_chunk_chars,
         concurrency=concurrency,
         title_hint=title_hint,
+        prompt_outline_mode=prompt_outline_mode,
+        prompt_glossary_mode=prompt_glossary_mode,
         write_text=atomic_write_text,
     )
     return 0

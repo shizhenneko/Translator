@@ -6,6 +6,14 @@ from typing import Dict, List, Optional, Tuple, cast
 from openai.types.chat import ChatCompletionMessageParam
 
 from .llm_client import KimiClient
+from .validation import (
+    require_bool,
+    require_dict,
+    require_int,
+    require_list,
+    require_str,
+    require_str_list,
+)
 
 
 _PROFILE_SCHEMA_EXAMPLE = json.dumps(
@@ -318,50 +326,34 @@ def _apply_glossary_defaults(payload: Dict[str, object]) -> None:
 
 
 def _require_dict(value: object, label: str) -> Dict[str, object]:
-    if not isinstance(value, dict):
-        raise ProfileError(f"{label} must be a JSON object")
-    return cast(Dict[str, object], value)
+    return require_dict(value, label, ProfileError, expected="a JSON object")
 
 
 def _require_list(value: object, label: str) -> List[object]:
-    if not isinstance(value, list):
-        raise ProfileError(f"{label} must be a JSON array")
-    return cast(List[object], value)
+    return require_list(value, label, ProfileError, expected="a JSON array")
 
 
 def _require_str(value: object, label: str) -> str:
-    if not isinstance(value, str):
-        raise ProfileError(f"{label} must be a string")
-    return value
+    return require_str(value, label, ProfileError)
 
 
 def _require_int(value: object, label: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ProfileError(f"{label} must be an integer")
-    return value
+    return require_int(value, label, ProfileError)
 
 
 def _require_bool(value: object, label: str) -> bool:
-    if not isinstance(value, bool):
-        raise ProfileError(f"{label} must be a boolean")
-    return value
+    return require_bool(value, label, ProfileError)
 
 
 def _require_str_list(value: object, label: str) -> List[str]:
-    # LLM may return None, a single string, or a list — coerce gracefully.
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value] if value.strip() else []
-    if not isinstance(value, list):
-        raise ProfileError(f"{label} must be a list of strings")
-    values: List[str] = []
-    items = cast(List[object], value)
-    for index, item in enumerate(items):
-        if not isinstance(item, str):
-            raise ProfileError(f"{label}[{index}] must be a string")
-        values.append(item)
-    return values
+    return require_str_list(
+        value,
+        label,
+        ProfileError,
+        allow_none=True,
+        allow_str=True,
+        expected="a list of strings",
+    )
 
 
 def _escape_table_cell(value: str) -> str:

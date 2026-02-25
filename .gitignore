@@ -34,7 +34,7 @@ htmlcov/
 .sisyphus/
 
 # Local debug/output artifacts
-debug-fetch/
 debug_fetched.md
-
+raw.html
 documents/
+tests/

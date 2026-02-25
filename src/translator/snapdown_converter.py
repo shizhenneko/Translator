@@ -10,12 +10,17 @@ from .jina_reader_fetcher import SnapdownBlock
 from .llm_client import KimiClient
 
 
+class SnapdownConverterError(RuntimeError):
+    pass
+
+
 def _build_messages(content: str) -> List[ChatCompletionMessageParam]:
     system_prompt = (
         "You convert Snapdown DSL diagrams into Mermaid graph syntax. "
-        "Return a JSON object with a single key 'mermaid' and a string value. "
-        "The Mermaid value must be raw Mermaid code only with no backticks, "
-        "no code fences, and no surrounding commentary."
+        "Output ONLY valid JSON. Do not include markdown, code fences, "
+        "or extra text. Return a JSON object with a single key 'mermaid' "
+        "and a string value. The Mermaid value must be raw Mermaid code "
+        "only with no backticks, no code fences, and no commentary."
     )
     user_prompt = f"Snapdown DSL:\n{content}"
     messages: List[ChatCompletionMessageParam] = [
@@ -68,12 +73,13 @@ def _sanitize_mermaid(content: str) -> str:
 def convert_snapdown_to_mermaid(
     blocks: List[SnapdownBlock],
     client: KimiClient,
+    cache: Optional[Dict[str, str]] = None,
 ) -> List[SnapdownBlock]:
     converted: List[SnapdownBlock] = []
     if not blocks:
         return converted
 
-    cache: Dict[str, str] = {}
+    cache_store: Dict[str, str] = cache if cache is not None else {}
 
     for block in blocks:
         if block.language != "snapdown":
@@ -81,7 +87,7 @@ def convert_snapdown_to_mermaid(
             continue
 
         content_hash = sha1(block.content.encode("utf-8")).hexdigest()
-        cached_mermaid = cache.get(content_hash)
+        cached_mermaid = cache_store.get(content_hash)
         if cached_mermaid is None:
             mermaid_content: Optional[str] = None
             try:
@@ -90,13 +96,14 @@ def convert_snapdown_to_mermaid(
                     json_mode=True,
                 )
                 mermaid_content = _extract_mermaid(response)
-            except Exception:
+            except Exception as exc:
+                _ = exc
                 mermaid_content = None
 
             if mermaid_content is not None:
                 mermaid_content = _sanitize_mermaid(mermaid_content)
             if mermaid_content:
-                cache[content_hash] = mermaid_content
+                cache_store[content_hash] = mermaid_content
                 cached_mermaid = mermaid_content
 
         if cached_mermaid:

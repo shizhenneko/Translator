@@ -9,6 +9,14 @@ from .chunking import build_chunk_plan
 from .llm_client import KimiClient
 from .snapdown_converter import convert_snapdown_to_mermaid
 from .step1_profile import profile as profile_step1
+from .validation import (
+    require_bool,
+    require_dict,
+    require_int,
+    require_list,
+    require_str,
+    require_str_list,
+)
 from .step2_translate import ChunkTranslation, translate_chunks
 
 from .jina_reader_fetcher import (
@@ -33,6 +41,8 @@ def translate_document(
     timeout_seconds: Optional[float] = None,
     title_hint: Optional[str] = None,
     snapdown_to_mermaid: bool = True,
+    prompt_outline_mode: str = "headings",
+    prompt_glossary_mode: str = "filtered",
     client: Optional[KimiClient] = None,
     write_text: Optional[Callable[[str, str], None]] = None,
 ) -> str:
@@ -73,6 +83,8 @@ def translate_document(
         client=llm_client,
         concurrency=concurrency,
         style_rules=style_rules,
+        prompt_outline_mode=prompt_outline_mode,
+        glossary_mode=prompt_glossary_mode,
     )
 
     output = _assemble_output(
@@ -265,49 +277,34 @@ def _render_glossary(glossary: Sequence[Dict[str, object]]) -> str:
 
 
 def _require_dict(value: object, label: str) -> Dict[str, object]:
-    if not isinstance(value, dict):
-        raise PipelineError(f"{label} must be an object")
-    return cast(Dict[str, object], value)
+    return require_dict(value, label, PipelineError, expected="an object")
 
 
 def _require_list(value: object, label: str) -> List[object]:
-    if not isinstance(value, list):
-        raise PipelineError(f"{label} must be an array")
-    return cast(List[object], value)
+    return require_list(value, label, PipelineError, expected="an array")
 
 
 def _require_str(value: object, label: str) -> str:
-    if not isinstance(value, str):
-        raise PipelineError(f"{label} must be a string")
-    return value
+    return require_str(value, label, PipelineError)
 
 
 def _require_int(value: object, label: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise PipelineError(f"{label} must be an integer")
-    return value
+    return require_int(value, label, PipelineError)
 
 
 def _require_bool(value: object, label: str) -> bool:
-    if not isinstance(value, bool):
-        raise PipelineError(f"{label} must be a boolean")
-    return value
+    return require_bool(value, label, PipelineError)
 
 
 def _require_str_list(value: object, label: str) -> List[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value] if value.strip() else []
-    if not isinstance(value, list):
-        raise PipelineError(f"{label} must be a list of strings")
-    values: List[str] = []
-    items = cast(List[object], value)
-    for index, item in enumerate(items):
-        if not isinstance(item, str):
-            raise PipelineError(f"{label}[{index}] must be a string")
-        values.append(item)
-    return values
+    return require_str_list(
+        value,
+        label,
+        PipelineError,
+        allow_none=True,
+        allow_str=True,
+        expected="a list of strings",
+    )
 
 
 def _escape_table_cell(value: str) -> str:

@@ -213,3 +213,18 @@ def test_invalid_restoration_map():
 
     with pytest.raises(PreservationError, match="invalid placeholder format"):
         restore(protected, invalid_map)
+
+
+def test_underscore_adjacent_to_inline_code():
+    original = "Use _`variable`_ for emphasis."
+    protected, restoration_map = protect(original)
+    restored = restore(protected, restoration_map)
+    assert restored == original
+
+
+def test_unclosed_backtick_before_code_fence():
+    original = "Some `text here\n\n```python\nx = 1\n```\n\nAnd then `more` stuff.\n"
+    protected, restoration_map = protect(original)
+    assert "__CODE_BLOCK_001__" in protected
+    restored = restore(protected, restoration_map)
+    assert restored == original

@@ -2,13 +2,21 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+import os
 import re
-from typing import Dict, List, Optional, Sequence, cast
+from typing import Dict, List, Optional, Sequence
 
 from openai.types.chat import ChatCompletionMessageParam
 
 from .chunking import ChunkPlanEntry
 from .llm_client import KimiClient
+from .validation import (
+    require_bool,
+    require_dict,
+    require_int,
+    require_str,
+    require_str_list,
+)
 from .preservation import (
     PreservationError,
     protect,
@@ -19,7 +27,28 @@ from .preservation import (
 )
 
 
-_PLACEHOLDER_RE = re.compile(r"__([A-Z_]+)_[0-9]{3}__")
+_PLACEHOLDER_RE = re.compile(r"(?<![_A-Za-z0-9])__([A-Z][A-Z_]*)_[0-9]{3}__")
+
+
+def _read_env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if value < 0:
+        return default
+    return value
+
+
+_MAX_GLOSSARY_TERMS_PER_CHUNK = _read_env_int("TRANSLATOR_GLOSSARY_MAX_TERMS", 30)
+_MAX_GLOSSARY_CHARS_PER_CHUNK = _read_env_int("TRANSLATOR_GLOSSARY_MAX_CHARS", 2000)
+_GLOSSARY_MODES = {"filtered", "full"}
 
 
 class Step2TranslateError(RuntimeError):
@@ -73,6 +102,95 @@ def _fix_heading_collisions(text: str) -> str:
     )
 
 
+def _normalize_glossary_text(value: str) -> str:
+    normalized = value.casefold().replace("-", " ")
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
+
+def _tokenize_glossary_text(value: str) -> List[str]:
+    normalized = _normalize_glossary_text(value)
+    if not normalized:
+        return []
+    return re.findall(r"[a-z0-9]+", normalized)
+
+
+def _has_exact_phrase(term_normalized: str, chunk_normalized: str) -> bool:
+    if not term_normalized:
+        return False
+    pattern = r"\b" + re.escape(term_normalized) + r"\b"
+    if re.search(pattern, chunk_normalized):
+        return True
+    return term_normalized in chunk_normalized
+
+
+def _has_word_boundary(term_normalized: str, chunk_normalized: str) -> bool:
+    if not term_normalized:
+        return False
+    if re.search(r"[^\w\s]", term_normalized):
+        return term_normalized in chunk_normalized
+    pattern = r"\b" + re.escape(term_normalized) + r"\b"
+    return re.search(pattern, chunk_normalized) is not None
+
+
+def _filter_glossary_for_chunk(
+    glossary: Sequence[Dict[str, object]],
+    chunk_text: str,
+    max_terms: int = _MAX_GLOSSARY_TERMS_PER_CHUNK,
+    max_chars: int = _MAX_GLOSSARY_CHARS_PER_CHUNK,
+) -> List[Dict[str, object]]:
+    if not glossary or not chunk_text:
+        return []
+    if max_terms <= 0 or max_chars <= 0:
+        return []
+
+    chunk_normalized = _normalize_glossary_text(chunk_text)
+    if not chunk_normalized:
+        return []
+    chunk_tokens = set(re.findall(r"[a-z0-9]+", chunk_normalized))
+
+    candidates: List[tuple[int, int, Dict[str, object], int]] = []
+    for index, entry in enumerate(glossary):
+        item = _require_dict(entry, f"glossary[{index}]")
+        term_en = _require_str(item.get("term_en"), f"glossary[{index}].term_en")
+        term_zh = _require_str(item.get("term_zh"), f"glossary[{index}].term_zh")
+        note_zh = _require_str(item.get("note_zh"), f"glossary[{index}].note_zh")
+
+        term_tokens = _tokenize_glossary_text(term_en)
+        term_token_set = set(term_tokens)
+        term_normalized = _normalize_glossary_text(term_en)
+
+        priority: Optional[int] = None
+        if len(term_token_set) >= 2:
+            if _has_exact_phrase(term_normalized, chunk_normalized):
+                priority = 1
+            else:
+                overlap = len(term_token_set.intersection(chunk_tokens))
+                if term_token_set and overlap / len(term_token_set) >= 0.5:
+                    priority = 3
+        else:
+            if _has_word_boundary(term_normalized, chunk_normalized):
+                priority = 2
+
+        if priority is None:
+            continue
+
+        entry_chars = len(term_en) + len(term_zh) + len(note_zh)
+        candidates.append((priority, index, item, entry_chars))
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    filtered: List[Dict[str, object]] = []
+    total_chars = 0
+    for _, _, entry, entry_chars in candidates:
+        if len(filtered) >= max_terms:
+            break
+        if total_chars + entry_chars > max_chars:
+            continue
+        filtered.append(entry)
+        total_chars += entry_chars
+    return filtered
+
+
 def translate_chunk(
     chunk_text: str,
     outline: Sequence[Dict[str, object]],
@@ -82,9 +200,17 @@ def translate_chunk(
     chunk_id: str = "",
     index: int = 0,
     style_rules: Optional[Sequence[str]] = None,
+    prompt_outline_mode: str = "headings",
+    glossary_mode: str = "filtered",
 ) -> ChunkTranslation:
     if not chunk_text:
         return ChunkTranslation(chunk_id=chunk_id, index=index, text="", warnings=[])
+    if glossary_mode not in _GLOSSARY_MODES:
+        raise Step2TranslateError("glossary_mode must be 'filtered' or 'full'")
+
+    glossary_for_chunk = glossary
+    if glossary_mode == "filtered":
+        glossary_for_chunk = _filter_glossary_for_chunk(glossary, chunk_text)
 
     protected_text, restoration_map = protect(chunk_text)
     if len(restoration_map) > 30:
@@ -94,10 +220,11 @@ def translate_chunk(
     translated = _translate_with_placeholder_retries(
         client=llm_client,
         outline=outline,
-        glossary=glossary,
+        glossary=glossary_for_chunk,
         protected_chunk=protected_text,
         expected_placeholders=expected_placeholders,
         style_rules=style_rules,
+        prompt_outline_mode=prompt_outline_mode,
     )
 
     try:
@@ -111,7 +238,9 @@ def translate_chunk(
     qa_warnings = _validate_restored_chunk(
         original=chunk_text, restored=cleaned_restored
     )
-    warnings = qa_warnings + _collect_glossary_warnings(cleaned_restored, glossary)
+    warnings = qa_warnings + _collect_glossary_warnings(
+        cleaned_restored, glossary_for_chunk
+    )
     return ChunkTranslation(
         chunk_id=chunk_id, index=index, text=cleaned_restored, warnings=warnings
     )
@@ -125,6 +254,8 @@ def translate_chunks(
     client: Optional[KimiClient] = None,
     concurrency: int = 3,
     style_rules: Optional[Sequence[str]] = None,
+    prompt_outline_mode: str = "headings",
+    glossary_mode: str = "filtered",
 ) -> List[ChunkTranslation]:
     if concurrency <= 0:
         raise ValueError("concurrency must be positive")
@@ -144,6 +275,8 @@ def translate_chunks(
                 chunk_id=chunk.chunk_id,
                 index=index,
                 style_rules=style_rules,
+                prompt_outline_mode=prompt_outline_mode,
+                glossary_mode=glossary_mode,
             )
             futures[future] = index
 
@@ -172,6 +305,7 @@ def _translate_with_placeholder_retries(
     protected_chunk: str,
     expected_placeholders: Sequence[str],
     style_rules: Optional[Sequence[str]],
+    prompt_outline_mode: str = "headings",
 ) -> str:
     messages = _build_step2_messages(
         outline,
@@ -179,6 +313,7 @@ def _translate_with_placeholder_retries(
         protected_chunk,
         style_rules=style_rules,
         placeholder_tokens=expected_placeholders if expected_placeholders else None,
+        prompt_outline_mode=prompt_outline_mode,
     )
 
     if not expected_placeholders:
@@ -197,6 +332,7 @@ def _translate_with_placeholder_retries(
                 protected_chunk,
                 style_rules=style_rules,
                 placeholder_tokens=expected_placeholders,
+                prompt_outline_mode=prompt_outline_mode,
             )
         result = client.chat_completion(messages, json_mode=False)
         missing = sum(1 for p in expected_set if p not in result)
@@ -218,6 +354,7 @@ def _build_step2_messages(
     *,
     style_rules: Optional[Sequence[str]] = None,
     placeholder_tokens: Optional[Sequence[str]] = None,
+    prompt_outline_mode: str = "full",
 ) -> List[ChatCompletionMessageParam]:
     system_prompt = (
         "You are a technical translation assistant for study notes. "
@@ -225,7 +362,7 @@ def _build_step2_messages(
         "Preserve all placeholders and Markdown structure exactly."
     )
 
-    outline_block = _render_condensed_outline(outline)
+    outline_block = _render_condensed_outline(outline, mode=prompt_outline_mode)
     glossary_block = _render_glossary(glossary)
     rules_block = _render_style_rules(style_rules)
 
@@ -276,16 +413,9 @@ def _build_step2_messages(
     ]
 
 
-def _is_placeholder_validation_error(exc: BaseException) -> bool:
-    message = str(exc)
-    return (
-        "placeholder missing" in message
-        or "placeholder duplicated" in message
-        or "unknown placeholder" in message
-    )
-
-
-def _render_condensed_outline(outline: Sequence[Dict[str, object]]) -> str:
+def _render_condensed_outline(
+    outline: Sequence[Dict[str, object]], mode: str = "full"
+) -> str:
     if not outline:
         return "_No outline provided._"
     lines: List[str] = []
@@ -293,23 +423,30 @@ def _render_condensed_outline(outline: Sequence[Dict[str, object]]) -> str:
         item = _require_dict(entry, f"outline[{index}]")
         level = _require_int(item.get("level"), f"outline[{index}].level")
         heading = _require_str(item.get("heading"), f"outline[{index}].heading")
-        summary_bullets = _require_str_list(
-            item.get("summary_bullets"), f"outline[{index}].summary_bullets"
-        )
-        key_takeaways = _require_str_list(
-            item.get("key_takeaways"), f"outline[{index}].key_takeaways"
-        )
 
-        details: List[str] = []
-        if summary_bullets:
-            details.append("Summary: " + "; ".join(summary_bullets))
-        if key_takeaways:
-            details.append("Takeaways: " + "; ".join(key_takeaways))
+        if mode == "headings":
+            # Headings-only mode: no summary_bullets or key_takeaways
+            line = f"- L{level} {heading}"
+            lines.append(line)
+        else:
+            # Full mode (legacy): include summary_bullets and key_takeaways
+            summary_bullets = _require_str_list(
+                item.get("summary_bullets"), f"outline[{index}].summary_bullets"
+            )
+            key_takeaways = _require_str_list(
+                item.get("key_takeaways"), f"outline[{index}].key_takeaways"
+            )
 
-        line = f"- L{level} {heading}"
-        if details:
-            line += " | " + " | ".join(details)
-        lines.append(line)
+            details: List[str] = []
+            if summary_bullets:
+                details.append("Summary: " + "; ".join(summary_bullets))
+            if key_takeaways:
+                details.append("Takeaways: " + "; ".join(key_takeaways))
+
+            line = f"- L{level} {heading}"
+            if details:
+                line += " | " + " | ".join(details)
+            lines.append(line)
     return "\n".join(lines)
 
 
@@ -389,39 +526,28 @@ def _collect_glossary_warnings(
 
 
 def _require_dict(value: object, label: str) -> Dict[str, object]:
-    if not isinstance(value, dict):
-        raise Step2TranslateError(f"{label} must be a dict")
-    return cast(Dict[str, object], value)
+    return require_dict(value, label, Step2TranslateError, expected="a dict")
 
 
 def _require_str(value: object, label: str) -> str:
-    if not isinstance(value, str):
-        raise Step2TranslateError(f"{label} must be a string")
-    return value
+    return require_str(value, label, Step2TranslateError)
 
 
 def _require_int(value: object, label: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise Step2TranslateError(f"{label} must be an integer")
-    return value
+    return require_int(value, label, Step2TranslateError)
 
 
 def _require_bool(value: object, label: str) -> bool:
-    if not isinstance(value, bool):
-        raise Step2TranslateError(f"{label} must be a boolean")
-    return value
+    return require_bool(value, label, Step2TranslateError)
 
 
 def _require_str_list(value: object, label: str) -> List[str]:
-    if not isinstance(value, list):
-        raise Step2TranslateError(f"{label} must be a list of strings")
-    items = cast(List[object], value)
-    values: List[str] = []
-    for index, item in enumerate(items):
-        if not isinstance(item, str):
-            raise Step2TranslateError(f"{label}[{index}] must be a string")
-        values.append(item)
-    return values
+    return require_str_list(
+        value,
+        label,
+        Step2TranslateError,
+        expected="a list of strings",
+    )
 
 
 def _escape_table_cell(value: str) -> str:
