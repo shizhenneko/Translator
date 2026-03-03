@@ -10,6 +10,8 @@ from typing import Callable, Dict, List, Optional, Protocol, Sequence, TypeVar, 
 
 import requests
 
+from .markdown_autofix import normalize_list_fence_indentation
+
 
 JINA_READER_BASE_URL = "https://r.jina.ai/"
 DEFAULT_MIN_CONTENT_LENGTH = 200
@@ -138,6 +140,10 @@ def _normalize_heading(text: str) -> str:
 
 def _strip_html_tags(text: str) -> str:
     return _HTML_TAG_RE.sub("", text)
+
+
+def _fix_jina_list_codeblocks(markdown: str) -> str:
+    return normalize_list_fence_indentation(markdown)
 
 
 def extract_snapdown_blocks_from_html(html_text: str) -> List[SnapdownBlock]:
@@ -332,7 +338,7 @@ def fetch_markdown(url: str, config: Optional[JinaReaderConfig] = None) -> str:
                 f"Content too short ({len(content)} < {config.min_content_length})"
             )
 
-        return content
+        return _fix_jina_list_codeblocks(content)
 
     try:
         tenacity = cast(

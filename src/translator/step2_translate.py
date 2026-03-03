@@ -25,9 +25,21 @@ from .preservation import (
     validate_math_delimiters,
     validate_url_targets,
 )
+from .markdown_autofix import autofix_markdown
 
 
-_PLACEHOLDER_RE = re.compile(r"(?<![_A-Za-z0-9])__([A-Z][A-Z_]*)_[0-9]{3}__")
+_PLACEHOLDER_TOKEN_RE = r"__([A-Z][A-Z_]*)_[0-9]{3}__"
+_PLACEHOLDER_RE = re.compile(rf"(?<![_A-Za-z0-9]){_PLACEHOLDER_TOKEN_RE}")
+_PLACEHOLDER_BACKTICK_RE = re.compile(rf"`+(?P<token>{_PLACEHOLDER_TOKEN_RE})`+")
+_PLACEHOLDER_FENCED_BLOCK_RE = re.compile(
+    "".join(
+        [
+            r"(?m)(^|\n)(?P<fence>`{3,}|~{3,})[A-Za-z0-9_-]*[ \t]*\n",
+            rf"(?P<token>{_PLACEHOLDER_TOKEN_RE})\n",
+            r"(?P=fence)[ \t]*(?=\n|$)",
+        ]
+    )
+)
 
 
 def _read_env_int(name: str, default: int) -> int:
@@ -70,9 +82,75 @@ def _strip_unknown_placeholders(text: str, restoration_map: Dict[str, str]) -> s
     )
 
 
+def _strip_placeholder_backticks(text: str) -> str:
+    text = _PLACEHOLDER_BACKTICK_RE.sub(lambda m: m.group("token"), text)
+    return _PLACEHOLDER_FENCED_BLOCK_RE.sub(
+        lambda m: f"{m.group(1)}{m.group('token')}", text
+    )
+
+
 def _strip_prompt_markers(text: str) -> str:
     cleaned = re.sub(r"^[ \t]*(<<<|>>>)\s*$\n?", "", text, flags=re.MULTILINE)
     return re.sub(r"^[ \t]*(<<<|>>>)\s*(#+\s*)", r"\2", cleaned, flags=re.MULTILINE)
+
+
+# Regex: fenced block with single short line appearing inline = LLM-expanded inline code
+# Case A: fence on same line as preceding text: `没有 ```plaintext\ncheckout\n```\n 命令`
+_INLINE_FENCE_SAMELINE_RE = re.compile(
+    r"(?P<before>\S)[ \t]*"  # non-whitespace char before fence
+    r"(?P<fence>`{3,}|~{3,})"  # opening fence on same line
+    r"[^\S\n]*(?:plaintext|text)?[^\S\n]*\n"  # optional lang tag
+    r"(?P<code>[^\n]{1,80})\n"  # single short content line
+    r"[ \t]*(?P=fence)[ \t]*\n?"  # closing fence
+    r"(?P<after>[ \t]*\S)",  # non-blank content follows
+)
+
+# Case B: fence on new line after non-blank line
+_INLINE_FENCE_NEWLINE_RE = re.compile(
+    r"(?P<before>[^\n])[ \t]*\n"  # non-blank line before fence
+    r"[ \t]*(?P<fence>`{3,}|~{3,})"  # opening fence on new line
+    r"[^\S\n]*(?:plaintext|text)?[^\S\n]*\n"  # optional lang tag
+    r"(?P<code>[^\n]{1,80})\n"  # single short content line
+    r"[ \t]*(?P=fence)[ \t]*\n?"  # closing fence
+    r"(?P<after>[ \t]*\S)",  # non-blank content follows
+)
+
+# Case C: fence at the very start of text
+_INLINE_FENCE_START_RE = re.compile(
+    r"^[ \t]*(?P<fence>`{3,}|~{3,})"
+    r"[^\S\n]*(?:plaintext|text)?[^\S\n]*\n"
+    r"(?P<code>[^\n]{1,80})\n"
+    r"[ \t]*(?P=fence)[ \t]*\n?"
+    r"(?P<after>[ \t]*\S)",
+)
+
+
+def _fix_inline_fenced_code(text: str) -> str:
+    limit = 500
+    for pattern in (_INLINE_FENCE_SAMELINE_RE, _INLINE_FENCE_NEWLINE_RE):
+        for _ in range(limit):
+            new_text = pattern.sub(
+                lambda m: (
+                    f"{m.group('before')} `{m.group('code').strip()}` {m.group('after')}"
+                ),
+                text,
+                count=1,
+            )
+            if new_text == text:
+                break
+            text = new_text
+
+    for _ in range(limit):
+        new_text = _INLINE_FENCE_START_RE.sub(
+            lambda m: f"`{m.group('code').strip()}` {m.group('after')}",
+            text,
+            count=1,
+        )
+        if new_text == text:
+            break
+        text = new_text
+
+    return text
 
 
 def _fix_heading_collisions(text: str) -> str:
@@ -94,11 +172,16 @@ def _fix_heading_collisions(text: str) -> str:
         text,
         flags=re.MULTILINE,
     )
-    return re.sub(
+    text = re.sub(
         r"^([ \t]*\d+[.)]\s+[^\n]*?)(#{1,6}\s+)",
         r"\1\n\2",
         text,
         flags=re.MULTILINE,
+    )
+    return re.sub(
+        r"([.!?。！？\]\)])\s*(#{2,6}\s+)",
+        r"\1\n\2",
+        text,
     )
 
 
@@ -213,8 +296,6 @@ def translate_chunk(
         glossary_for_chunk = _filter_glossary_for_chunk(glossary, chunk_text)
 
     protected_text, restoration_map = protect(chunk_text)
-    if len(restoration_map) > 30:
-        protected_text, restoration_map = protect(chunk_text, skip_inline_code=True)
     llm_client = client or KimiClient()
     expected_placeholders = sorted(restoration_map.keys())
     translated = _translate_with_placeholder_retries(
@@ -228,13 +309,16 @@ def translate_chunk(
     )
 
     try:
-        cleaned = _strip_unknown_placeholders(translated, restoration_map)
+        cleaned = _strip_placeholder_backticks(translated)
+        cleaned = _strip_unknown_placeholders(cleaned, restoration_map)
         restored = restore(cleaned, restoration_map, strict=False)
     except PreservationError as exc:
         raise Step2TranslateError(f"restore failed: {exc}") from exc
 
     cleaned_restored = _strip_prompt_markers(restored)
     cleaned_restored = _fix_heading_collisions(cleaned_restored)
+    cleaned_restored = _fix_inline_fenced_code(cleaned_restored)
+    cleaned_restored = autofix_markdown(cleaned_restored)
     qa_warnings = _validate_restored_chunk(
         original=chunk_text, restored=cleaned_restored
     )
@@ -371,6 +455,7 @@ def _build_step2_messages(
         "Requirements:",
         "- Output Markdown only; no JSON wrapper, no extra commentary.",
         "- Preserve Markdown structure, links, math, code fences, and inline code.",
+        "- NEVER convert inline code (`backticks`) into fenced code blocks (```). Keep `code` as `code`.",
         "- Do not translate or modify placeholder tokens like __CODE_BLOCK_001__.",
         "- Term style: 首次出现使用 `中文（English）`，后续只用中文。",
         "- Annotation density: medium (key explanation + 1 example/analogy).",

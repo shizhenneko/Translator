@@ -15,6 +15,9 @@ from .chunking import (
     chunk_plan_payload,
     reconstruct_from_chunks,
 )
+from .markdown_autofix import MarkdownAutofixOptions, autofix_markdown
+from .markdown_lint import MarkdownLintOptions, format_issue_report, lint_markdown
+from .markdown_sanitize import sanitize_markdown_input
 from .preservation import PreservationError, protect, restore
 from .step1_profile import profile as profile_step1
 
@@ -253,6 +256,72 @@ def cmd_translate_md(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_lint_md(args: argparse.Namespace) -> int:
+    input_path = cast(str, args.input_path)
+    fix = bool(cast(bool, args.fix))
+    out_path = cast(Optional[str], args.out)
+    in_place = bool(cast(bool, args.in_place))
+    strict_renderer = cast(str, args.strict_renderer).lower() != "off"
+    max_safe_list_depth = int(cast(int, args.max_safe_list_depth))
+
+    try:
+        if max_safe_list_depth <= 0:
+            raise ValueError("--max-safe-list-depth must be positive")
+        lint_options = MarkdownLintOptions(
+            strict_renderer=strict_renderer, max_safe_list_depth=max_safe_list_depth
+        )
+        autofix_options = MarkdownAutofixOptions(
+            strict_renderer=strict_renderer, max_safe_list_depth=max_safe_list_depth
+        )
+
+        content = read_text(input_path)
+
+        if not fix:
+            issues = lint_markdown(content, options=lint_options)
+            if issues:
+                print(format_issue_report(issues), file=sys.stderr)
+                return 1
+            return 0
+
+        if out_path and in_place:
+            raise ValueError("--out and --in-place cannot be used together")
+        if not out_path and not in_place:
+            raise ValueError("--fix requires --out or --in-place")
+
+        sanitized = sanitize_markdown_input(content, aggressive=True)
+        fixed = autofix_markdown(sanitized, options=autofix_options)
+        issues = lint_markdown(fixed, options=lint_options)
+        if issues:
+            print(format_issue_report(issues), file=sys.stderr)
+            return 1
+
+        target_path = input_path if in_place else cast(str, out_path)
+        atomic_write_text(target_path, fixed)
+        return 0
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+def cmd_sanitize_md(args: argparse.Namespace) -> int:
+    input_path = cast(str, args.input_path)
+    out_path = cast(Optional[str], args.out)
+    in_place = bool(cast(bool, args.in_place))
+    try:
+        if out_path and in_place:
+            raise ValueError("--out and --in-place cannot be used together")
+        if not out_path and not in_place:
+            raise ValueError("--out or --in-place is required")
+        content = read_text(input_path)
+        sanitized = sanitize_markdown_input(content, aggressive=True)
+        target_path = input_path if in_place else cast(str, out_path)
+        atomic_write_text(target_path, sanitized)
+        return 0
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
 def cmd_debug_fetch(args: argparse.Namespace) -> int:
     url = cast(str, args.url)
     out_path = cast(str, args.out)
@@ -412,6 +481,26 @@ def build_parser() -> argparse.ArgumentParser:
     _ = translate_md.add_argument("--out", required=True)
     add_common_options(translate_md)
     translate_md.set_defaults(func=cmd_translate_md)
+
+    lint_md = subparsers.add_parser("lint-md")
+    _ = lint_md.add_argument("--in", dest="input_path", required=True)
+    _ = lint_md.add_argument("--fix", action="store_true")
+    _ = lint_md.add_argument("--out")
+    _ = lint_md.add_argument("--in-place", action="store_true")
+    _ = lint_md.add_argument(
+        "--strict-renderer",
+        choices=["on", "off"],
+        default="on",
+        help="Enable markdown-it renderer safety checks",
+    )
+    _ = lint_md.add_argument("--max-safe-list-depth", type=int, default=1)
+    lint_md.set_defaults(func=cmd_lint_md)
+
+    sanitize_md = subparsers.add_parser("sanitize-md")
+    _ = sanitize_md.add_argument("--in", dest="input_path", required=True)
+    _ = sanitize_md.add_argument("--out")
+    _ = sanitize_md.add_argument("--in-place", action="store_true")
+    sanitize_md.set_defaults(func=cmd_sanitize_md)
 
     debug_fetch = subparsers.add_parser("debug-fetch")
     _ = debug_fetch.add_argument("--url", required=True)
