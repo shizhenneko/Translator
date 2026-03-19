@@ -6,8 +6,8 @@ from typing import Dict, List, Optional, cast
 
 from openai.types.chat import ChatCompletionMessageParam
 
-from .jina_reader_fetcher import SnapdownBlock
-from .llm_client import KimiClient
+from ..io.jina_reader_fetcher import SnapdownBlock
+from ..llm.client import KimiClient
 
 
 class SnapdownConverterError(RuntimeError):

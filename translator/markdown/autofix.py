@@ -5,7 +5,7 @@ import os
 import re
 from typing import List, Optional, Sequence, Set, Tuple
 
-from .markdown_lint import (
+from .lint import (
     MarkdownLintOptions,
     RULE_LIST_FENCE_CHAINING,
     RULE_LIST_FENCE_COMPLEX_DEPTH,

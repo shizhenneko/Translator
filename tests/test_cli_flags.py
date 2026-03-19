@@ -24,6 +24,15 @@ def test_translate_url_default_snapdown_flag():
     assert args.output_format == "readable"
 
 
+def test_serve_defaults():
+    parser = build_parser()
+    args = parser.parse_args(["serve"])
+
+    assert args.host == "127.0.0.1"
+    assert args.port == 10001
+    assert args.workers == 2
+
+
 def test_translate_unified_default_flags():
     parser = build_parser()
     args = parser.parse_args(

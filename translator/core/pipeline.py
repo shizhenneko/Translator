@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Sequence, cast
 
 from .chunking import ChunkPlanEntry, build_chunk_plan
-from .llm_client import KimiClient
+from ..llm.client import KimiClient
 from .snapdown_converter import convert_snapdown_to_mermaid
 from .step1_profile import build_lightweight_profile, profile as profile_step1
 from .validation import (
@@ -21,16 +21,16 @@ from .validation import (
 )
 from .step2_translate import ChunkTranslation, translate_chunks
 
-from .jina_reader_fetcher import (
+from ..io.jina_reader_fetcher import (
     JinaReaderConfig,
     fetch_markdown,
     fetch_snapdown_blocks,
     insert_snapdown_blocks,
 )
-from .markdown_autofix import MarkdownAutofixOptions, autofix_markdown
-from .markdown_lint import MarkdownLintOptions, format_issue_report, lint_markdown
-from .markdown_normalize import normalize_markdown_for_preview
-from .markdown_sanitize import sanitize_markdown_input
+from ..markdown.autofix import MarkdownAutofixOptions, autofix_markdown
+from ..markdown.lint import MarkdownLintOptions, format_issue_report, lint_markdown
+from ..markdown.normalize import normalize_markdown_for_preview
+from ..markdown.sanitize import sanitize_markdown_input
 
 logger = logging.getLogger(__name__)
 

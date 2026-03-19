@@ -17,3 +17,4 @@ def test_python_module_launcher_help() -> None:
 
     assert result.returncode == 0
     assert "translate" in result.stdout
+    assert "serve" in result.stdout

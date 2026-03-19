@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from openai.types.chat import ChatCompletionMessageParam
 
 from .chunking import ChunkPlanEntry
-from .llm_client import KimiClient
+from ..llm.client import KimiClient
 from .validation import (
     require_bool,
     require_dict,
@@ -27,8 +27,8 @@ from .preservation import (
     validate_math_delimiters,
     validate_url_targets,
 )
-from .markdown_autofix import autofix_markdown
-from .markdown_normalize import normalize_markdown_for_preview
+from ..markdown.autofix import autofix_markdown
+from ..markdown.normalize import normalize_markdown_for_preview
 
 
 _PLACEHOLDER_TOKEN_RE = r"__([A-Z][A-Z_]*)_[0-9]{3}__"

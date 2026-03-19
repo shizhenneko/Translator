@@ -1,50 +1,188 @@
-# 课程笔记 AI 导读与翻译器（translator）
+# Translator
 
-一个面向英文课程笔记和文档页面的 Python CLI 工具：
-输入网页 URL 或本地 Markdown，输出适合直接阅读和在 VS Code Markdown Preview Enhanced 中预览的中文 Markdown，并尽量保持公式、代码块、链接与标题结构稳定。
+<p align="center">
+  <strong>一个把网页或 Markdown 转成中文 Markdown 的本地优先翻译工具。</strong>
+</p>
 
-## 功能概览
+<p align="center">
+  支持 Web 控制台和 CLI 两种入口。<br />
+  你可以翻译单个 URL、上传 <code>url.txt</code> 批量处理，或者直接翻译本地 Markdown 文件。
+</p>
 
-- 双输入模式：支持 URL 抓取（Jina Reader）与本地 Markdown 文件
-- 双模式输出：默认 `readable` 直接产出适合阅读的正文；`analysis` 保留 Meta / Outline / Glossary
-- 结构保护优先：保护代码块、行内代码、数学公式、链接等敏感片段
-- Markdown 护栏：内置 sanitize + normalize + autofix + lint，降低渲染风险
-- 可读性优先：默认输出忠实、清爽，只有在确实有助理解时才补充少量说明
-- 原子写入：写入失败不污染目标文件
-- 可并发翻译：支持多线程分块并行
-- 单命令工作流：默认只需一条 `translate` 命令
-- Snapdown 处理：URL 模式下可将 `snapdown` 图块自动转换为 `mermaid`
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.8%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.8+" />
+  <img src="https://img.shields.io/badge/Flask-Web_UI-111827?style=flat-square&logo=flask&logoColor=white" alt="Flask Web UI" />
+  <img src="https://img.shields.io/badge/DeepSeek-OpenAI_Compatible-10A37F?style=flat-square" alt="DeepSeek compatible" />
+  <img src="https://img.shields.io/badge/Platform-Windows_%2B_WSL-005571?style=flat-square" alt="Windows and WSL" />
+  <img src="https://img.shields.io/badge/Tested-pytest-0A9EDC?style=flat-square&logo=pytest&logoColor=white" alt="pytest tested" />
+</p>
 
-## 快速开始
+<p align="center">
+  <a href="#features">Features</a> ·
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#usage">Usage</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#project-structure">Project Structure</a> ·
+  <a href="#development">Development</a>
+</p>
 
-### 1. 环境要求
+## Features
 
-- Python 3.8+
-- 可用的 DeepSeek API Key（必需）
+- Web 控制台：浏览器里直接提交单个 URL 或 `url.txt` 批量任务。
+- CLI 入口：适合脚本化、自动化和本地调试。
+- 单 URL 翻译：输入一条网页链接，输出一个中文 Markdown 文件。
+- 批量翻译：上传 `url.txt`，按行读取 URL，完成后输出 ZIP。
+- 本地 Markdown 翻译：直接处理已有 `.md` 文件。
+- Markdown 护栏：包含 sanitize、normalize、lint、autofix 等结构化处理能力。
+- 共享后端：Web 与 CLI 走同一套翻译管线和任务调度逻辑。
+- 双环境兼容：提供 Windows 和 WSL 各自的原生启动脚本。
+- 默认离线可测：多数测试不依赖真实 API，只有真实后端命令测试在 API Key 存在时才会启用。
 
-### 2. 安装依赖
+## Why This Project
+
+这个仓库最初是一个 Python CLI 翻译器，面向课程网页、文档页面和 Markdown 笔记。当前版本在原有管线之上补了一个本地优先的 Web 控制台，目标是把“可翻译、可启动、可测试、可批量化”这几件事整合到一个统一入口里，而不是再额外维护一套独立前端工程。
+
+适合的场景包括：
+
+- 把英文网页课程材料转成适合继续阅读的中文 Markdown
+- 批量抓取并翻译多条文档 URL
+- 在本地自动化脚本里复用 CLI
+- 在 Windows 和 WSL 两边保持一致的启动方式
+
+## Architecture
+
+```mermaid
+flowchart LR
+    A["Browser / CLI"] --> B["translator.app.cli"]
+    B --> C["Web App or Direct Command"]
+    C --> D["Shared Translation Runner"]
+    D --> E["translator.core.pipeline"]
+    E --> F["URL Fetch / Jina Reader"]
+    E --> G["Chunking + Profile + Translation"]
+    G --> H["Markdown Guardrails"]
+    H --> I[".md or .zip Output"]
+```
+
+Web 模式下，请求会被转成后台任务；CLI 模式下，则直接执行翻译流程。两者最终都会进入同一个共享 runner，再调用核心翻译管线。
+
+## Quick Start
+
+### Requirements
+
+- Python `3.8+`
+- `pip`
+- `DEEPSEEK_API_KEY`
+- 可选的 `JINA_API_KEY`
+
+### Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 配置环境变量（推荐使用 `.env`）
+### Environment Variables
 
 在仓库根目录创建 `.env`：
 
 ```env
 DEEPSEEK_API_KEY=your_deepseek_api_key
-# 可选
 JINA_API_KEY=your_jina_api_key
 DEEPSEEK_MODEL=deepseek-chat
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 ```
 
-CLI 启动时会自动加载 `.env`。
+运行命令时会自动加载 `.env`。
 
-### 4. 最短可运行示例
+### Start The Web UI
 
-#### 示例 A：从 URL 直接翻译
+```bash
+python -m translator serve
+```
+
+默认地址：
+
+```text
+http://127.0.0.1:10001/
+```
+
+指定端口：
+
+```bash
+python -m translator serve --port 10002
+```
+
+### First CLI Run
+
+翻译本地 Markdown：
+
+```bash
+python -m translator translate \
+  --in documents/6.031_note1.md \
+  --out output/note.zh.md
+```
+
+翻译单个 URL：
+
+```bash
+python -m translator translate \
+  --url https://example.com/article \
+  --out output/page.zh.md
+```
+
+## Usage
+
+### Web UI
+
+Web 控制台支持两种入口：
+
+#### 1. 单个 URL
+
+1. 启动 `python -m translator serve`
+2. 打开浏览器访问本地地址
+3. 在 `单 URL` 页签输入目标链接
+4. 提交任务
+5. 等待任务完成并下载 `.md`
+
+#### 2. 批量 `url.txt`
+
+`url.txt` 格式如下：
+
+```text
+# one URL per line
+https://example.com/a
+https://example.com/b
+```
+
+规则：
+
+- 每行一个 URL
+- 忽略空行
+- 忽略以 `#` 开头的注释行
+- 文件应为 UTF-8 编码
+
+批量任务完成后会提供 ZIP 下载。
+
+### CLI
+
+查看总帮助：
+
+```bash
+python -m translator --help
+```
+
+当前主命令包括：
+
+| Command | Description |
+| --- | --- |
+| `python -m translator serve` | 启动 Web 控制台 |
+| `python -m translator translate` | 统一翻译入口 |
+| `python -m translator lint-md` | 检查 Markdown 结构 |
+| `python -m translator sanitize-md` | 清洗 Markdown |
+| `python -m translator debug-*` | 调试抓取、分块、保护与 profile 流程 |
+
+#### Translate Examples
+
+翻译单个 URL：
 
 ```bash
 python -m translator translate \
@@ -52,71 +190,7 @@ python -m translator translate \
   --out output/proj2.zh.md
 ```
 
-#### 示例 B：翻译本地 Markdown
-
-```bash
-python -m translator translate \
-  --in documents/6.031_note1.md \
-  --out output/6.031_note1.zh.md
-```
-
-说明：
-
-- `output/` 不需要预先创建，程序会自动建目录
-- 默认输出格式是 `readable`，适合直接阅读和渲染
-- 只有在需要分析信息时才使用 `--output-format analysis`
-
-## 命令总览
-
-统一入口：
-
-```bash
-python -m translator --help
-```
-
-### 主要命令
-
-| 命令 | 用途 | 关键参数 |
-| --- | --- | --- |
-| `translate` | 统一入口，翻译单个 URL / 本地 Markdown / URL 列表 | `--url` 或 `--in` 或 `--url-list` |
-| `translate-md` | 翻译本地 Markdown | `--in`, `--out` |
-| `translate-url` | 抓取并翻译单个 URL | `--url`, `--out` |
-| `translate-url-batch` | 批量翻译 URL 列表 | `--url-list`, `--out-dir` |
-| `lint-md` | 检查 Markdown 结构风险 | `--in` |
-| `sanitize-md` | 预清洗 Markdown 抓取噪音 | `--in`, (`--out` 或 `--in-place`) |
-
-### 常用翻译参数（`translate-*`）
-
-- `--max-chunk-chars`：分块上限，默认 `5000`
-- `--concurrency`：并发数，CLI 默认 `2`
-- `--prompt-outline-mode`：`headings`（默认，提示词更短）或 `full`
-- `--prompt-glossary-mode`：`filtered`（默认，仅注入相关术语）或 `full`
-- `--output-format`：`readable`（默认，适合直接阅读）或 `analysis`
-- `--timeout`：URL 抓取超时秒数，默认 `30.0`
-
-### URL 模式参数
-
-- `--no-snapdown-mermaid`：关闭 Snapdown -> Mermaid 自动转换
-- `--jina-api-key-env`：从指定环境变量读取 Jina Key，并注入为 `JINA_API_KEY`
-
-### 批量 URL 示例
-
-```bash
-python -m translator translate \
-  --url https://example.com/a \
-  --url https://example.com/b \
-  --out-dir output/batch
-```
-
-说明：
-
-- 重复传 `--url` 即可直接批量，不需要先准备列表文件
-- `url.txt` 每行一个 URL
-- 空行与 `#` 开头行会被忽略
-- `--out-dir` 会自动创建
-- 输出文件名会按序号和 URL slug 自动生成，例如 `001-sp21-datastructur-es-materials-proj-proj2-proj2.md`
-
-如果你已经有 URL 列表文件，也可以继续使用：
+从 `url.txt` 批量翻译：
 
 ```bash
 python -m translator translate \
@@ -124,158 +198,204 @@ python -m translator translate \
   --out-dir output/batch
 ```
 
-### Markdown 质检与修复
-
-#### 仅检查
+翻译本地 Markdown：
 
 ```bash
-python -m translator lint-md --in output/cs231n.zh.md
+python -m translator translate \
+  --in documents/6.031_note1.md \
+  --out output/6.031_note1.zh.md
 ```
 
-#### 自动修复并输出到新文件
+检查 Markdown：
 
 ```bash
-python -m translator lint-md \
-  --in output/cs231n.zh.md \
-  --fix \
-  --out output/cs231n.zh.fixed.md
+python -m translator lint-md --in output/6.031_note1.zh.md
 ```
 
-#### 原地修复
+#### Common Translate Options
 
 ```bash
-python -m translator lint-md \
-  --in output/cs231n.zh.md \
-  --fix \
-  --in-place
+python -m translator translate --help
 ```
 
-#### 先清洗再修复（推荐处理抓取原文时使用）
+常用参数：
 
-```bash
-python -m translator sanitize-md --in raw.md --out raw.sanitized.md
-python -m translator lint-md --in raw.sanitized.md --fix --out raw.cleaned.md
-```
+- `--url`
+- `--in`
+- `--url-list` 或 `--url-file`
+- `--out`
+- `--out-dir`
+- `--concurrency`
+- `--timeout`
+- `--max-chunk-chars`
+- `--output-format readable|analysis`
+- `--no-snapdown-mermaid`
 
-### 调试命令
+## API
 
-- `debug-fetch`：测试 URL 抓取
-- `debug-chunk`：查看分块结果（可 `--json`）
-- `debug-reconstruct`：从 chunk JSON 重构文本
-- `debug-protect` / `debug-restore`：测试占位保护与还原
-- `debug-profile`：仅执行 Step1（全局提纲/术语）
+Web 控制台对外提供的本地接口如下：
 
-示例：
-
-```bash
-python -m translator debug-chunk --in documents/6.031_note1.md --json
-```
-
-## 输出内容结构
-
-默认 `readable` 输出包含：
-
-1. 一级标题
-2. `Source: ...` 来源行
-3. 正文翻译内容
-
-如果使用 `--output-format analysis`，会额外包含：
-
-1. `## Meta`
-2. `## Outline`
-3. `## Glossary`
-
-## 配置说明
-
-### LLM 相关环境变量
-
-| 变量名 | 是否必需 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `DEEPSEEK_API_KEY` | 是 | 无 | DeepSeek API Key |
-| `DEEPSEEK_MODEL` | 否 | `deepseek-chat` | 模型名覆盖，默认对应 DeepSeek-V3.2 |
-| `DEEPSEEK_BASE_URL` | 否 | `https://api.deepseek.com` | 官方接口地址 |
-| `JINA_API_KEY` | 否 | 无 | URL 抓取鉴权（按需） |
-
-### 运行时调优环境变量
-
-| 变量名 | 默认值 | 说明 |
+| Endpoint | Method | Description |
 | --- | --- | --- |
-| `TRANSLATOR_RETRY_LOG` | `1` | 重试日志开关，`0` 关闭 |
-| `TRANSLATOR_STRICT_RENDERER` | `true` | 严格 markdown-it 渲染安全检查 |
-| `TRANSLATOR_MAX_SAFE_LIST_DEPTH` | `1` | 列表中代码块安全深度上限 |
-| `TRANSLATOR_GLOSSARY_MAX_TERMS` | `30` | 每块注入术语条目上限 |
-| `TRANSLATOR_GLOSSARY_MAX_CHARS` | `2000` | 每块术语注入字符预算 |
-| `TRANSLATOR_TIMING_LOG` | `1` | 输出关键阶段耗时日志，`0` 关闭 |
+| `/` | `GET` | 控制台首页 |
+| `/api/jobs/url` | `POST` | 提交单个 URL 翻译任务 |
+| `/api/jobs/url-file` | `POST` | 上传 `url.txt` 并提交批量任务 |
+| `/api/jobs/<job_id>` | `GET` | 查询任务状态与明细 |
+| `/api/jobs/<job_id>/download` | `GET` | 下载 Markdown 或 ZIP |
 
-## 架构概览（Map-Reduce 风格）
+单 URL 请求体示例：
 
-1. 读取输入：URL 抓取或本地文件加载
-2. 输入清洗：修正常见抓取残留与 Markdown 异常
-3. 文档画像：`readable` 使用轻量本地画像，`analysis` 使用完整 Step1 画像
-4. 分块：按标题/段落感知切块
-5. Step2 分块翻译：占位保护 -> 翻译 -> 还原 -> QA
-6. 拼装输出：`readable` 输出标题 + 来源 + 正文；`analysis` 再附加分析区块
-7. 护栏校验：autofix + lint，不安全则失败
-8. 落盘：原子写入，避免部分写入损坏
+```json
+{
+  "url": "https://example.com/article",
+  "output_format": "readable",
+  "concurrency": 2,
+  "timeout": 30,
+  "max_chunk_chars": 5000,
+  "snapdown_to_mermaid": true
+}
+```
 
-## 测试
+## Configuration
 
-运行全部测试：
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `DEEPSEEK_API_KEY` | Yes | None | DeepSeek API Key |
+| `DEEPSEEK_MODEL` | No | `deepseek-chat` | 默认模型 |
+| `DEEPSEEK_BASE_URL` | No | `https://api.deepseek.com` | OpenAI-compatible 基础地址 |
+| `JINA_API_KEY` | No | None | Jina Reader 抓取鉴权 |
+| `TRANSLATOR_RETRY_LOG` | No | `1` | 控制 LLM 重试日志 |
+| `TRANSLATOR_TIMING_LOG` | No | `1` | 控制阶段耗时日志 |
+
+## Windows And WSL
+
+仓库提供两套原生启动脚本，避免 Windows 和 WSL 共用同一个虚拟环境。
+
+### WSL
+
+```bash
+bash ./start_wsl.sh
+```
+
+指定端口：
+
+```bash
+bash ./start_wsl.sh 10002
+```
+
+### Windows PowerShell
+
+```powershell
+.\start_windows.ps1
+```
+
+指定端口：
+
+```powershell
+.\start_windows.ps1 -Port 10002
+```
+
+### Windows CMD
+
+```bat
+start_windows.bat
+```
+
+这些脚本会自动创建虚拟环境、安装依赖，然后启动 `python -m translator serve`。
+
+## Runtime Output
+
+Web 任务默认会写到：
+
+```text
+.tmp/web-jobs/<job_id>/
+```
+
+其中可能包括：
+
+- 单任务输出的 `.md`
+- 批量任务输出的多个 `.md`
+- 打包后的 `.zip`
+
+旧任务目录会按 TTL 自动清理。
+
+## Project Structure
+
+```text
+translator/
+  app/                CLI 入口与命令分发
+  core/               翻译主流程、chunking、profile、validation
+  io/                 文件与抓取相关输入输出
+  llm/                LLM 客户端
+  markdown/           Markdown 清洗、归一化、lint、autofix
+  runtime/            运行时启动辅助
+  services/           共享 runner 与任务编排
+  web/                Flask Web UI、任务管理与模板
+  *.py                兼容旧导入路径的 shim 模块
+tests/                pytest 测试与 fixtures
+documents/            示例 Markdown 输入
+start_wsl.sh          WSL 启动脚本
+start_windows.ps1     Windows PowerShell 启动脚本
+start_windows.bat     Windows CMD 启动脚本
+```
+
+核心文件：
+
+- `translator/app/cli.py`：CLI 入口和命令分发
+- `translator/core/pipeline.py`：核心翻译流程
+- `translator/services/translation_runner.py`：共享翻译调度
+- `translator/web/app.py`：Flask app 和路由
+- `translator/web/jobs.py`：后台任务管理与下载
+
+## Development
+
+### Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### Run Tests
 
 ```bash
 pytest -q
 ```
 
-说明：
+测试覆盖包括：
 
-- 集成测试会在缺少 `DEEPSEEK_API_KEY` 时自动跳过
-- 建议在改动翻译流程、Markdown 规则或 CLI 参数后执行全量测试
+- CLI 行为测试
+- Markdown 处理与结构护栏测试
+- 翻译 runner 测试
+- Web 路由测试
+- Web 端到端测试
+- 启动脚本测试
+- 有真实 API Key 时的真实命令测试
 
-## 项目结构（简版）
+### Useful Commands
 
-```text
-translator/
-├── src/translator/           # 主实现
-│   ├── cli.py                # CLI 入口与子命令定义
-│   ├── pipeline.py           # 端到端编排
-│   ├── step1_profile.py      # 全局提纲/术语抽取
-│   ├── step2_translate.py    # 分块翻译与恢复
-│   ├── preservation.py       # 占位保护与校验
-│   ├── markdown_sanitize.py  # Markdown 预清洗
-│   ├── markdown_autofix.py   # Markdown 自动修复
-│   ├── markdown_lint.py      # Markdown 风险检测
-│   ├── chunking.py           # 分块逻辑
-│   ├── jina_reader_fetcher.py# Jina 抓取与 Snapdown 提取
-│   └── snapdown_converter.py # Snapdown -> Mermaid 转换
-├── translator/               # 根目录兼容包，仅保留入口与桥接
-├── tests/                    # 测试用例
-├── documents/                # 示例/产物文档
-├── url.txt                   # URL 列表示例
-└── requirements.txt
+```bash
+python -m translator --help
+python -m translator serve --help
+python -m translator translate --help
 ```
 
-## FAQ
+## Contributing
 
-### 1) 报错 `missing API key in env var: DEEPSEEK_API_KEY`
+欢迎提交 Issue 或 Pull Request。提交前建议至少完成以下检查：
 
-未设置 `DEEPSEEK_API_KEY`。请在 shell 环境或 `.env` 中配置后重试。
+```bash
+pytest -q
+```
 
-### 2) 输出目录不存在怎么办？
+PR 描述建议包含：
 
-不需要手动创建。`translate` / `translate-url` / `translate-url-batch` 都会自动创建目标目录。
+- 改动目的和用户可见变化
+- 影响的是 Web、CLI 还是底层翻译管线
+- 验证步骤
+- 如果涉及 UI 调整，附上截图
 
-### 3) 报错 `no URLs found in: ...`
+## Notes
 
-URL 列表文件为空，或全部是空行/注释行。请保证至少有一个有效 URL。
-
-### 4) 报错 `markdown guardrails failed`
-
-输出 Markdown 结构未通过最终护栏，程序会直接失败，避免写出无法正常渲染的文档。可先运行 `lint-md` 检查已有输出，或调小 `--max-chunk-chars` 重新翻译。
-
-### 5) 命令应该在 `src/` 下运行吗？
-
-不需要。本文档所有命令均基于仓库根目录执行：`python -m translator ...`。
-
-## License
-
-当前仓库未提供明确的 `LICENSE` 文件。如需开源发布，建议先补充许可证文本。
+- Web 前端采用 Flask + 原生 JavaScript，不依赖 Node 或 Vite。
+- CLI 仍然是完整的一等入口，适合自动化脚本和本地批处理。
+- 默认测试流程是离线安全的；真实 API 测试会在缺少 Key 时自动跳过。

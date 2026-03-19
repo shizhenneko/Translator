@@ -10,7 +10,7 @@ from typing import Callable, Dict, List, Optional, Protocol, Sequence, TypeVar, 
 
 import requests
 
-from .markdown_autofix import normalize_list_fence_indentation
+from ..markdown.autofix import normalize_list_fence_indentation
 
 
 JINA_READER_BASE_URL = "https://r.jina.ai/"

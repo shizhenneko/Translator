@@ -1,129 +1,31 @@
 import argparse
 import json
 import os
-import re
 import sys
-import tempfile
-from typing import Callable, Dict, List, Optional, Sequence, Set, cast
-from urllib.parse import unquote, urlparse
+from typing import Callable, Dict, List, Optional, Sequence, cast
 
 import requests
 from dotenv import load_dotenv
-from .chunking import (
+from ..core.chunking import (
     ChunkPlanEntry,
     build_chunk_plan,
     chunk_plan_payload,
     reconstruct_from_chunks,
 )
-from .markdown_autofix import MarkdownAutofixOptions, autofix_markdown
-from .markdown_lint import MarkdownLintOptions, format_issue_report, lint_markdown
-from .markdown_sanitize import sanitize_markdown_input
-from .preservation import PreservationError, protect, restore
-from .step1_profile import profile as profile_step1
-
-
-def read_text(path: str) -> str:
-    if not path:
-        raise ValueError("input path is required")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"input file not found: {path}")
-    if not os.path.isfile(path):
-        raise ValueError(f"input path is not a file: {path}")
-    with open(path, "r", encoding="utf-8") as handle:
-        return handle.read()
-
-
-def _read_url_list(path: str) -> List[str]:
-    content = read_text(path)
-    urls: List[str] = []
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        urls.append(stripped)
-    if not urls:
-        raise ValueError(f"no URLs found in: {path}")
-    return urls
-
-
-def _normalize_urls(values: Sequence[str]) -> List[str]:
-    urls: List[str] = []
-    for value in values:
-        stripped = value.strip()
-        if not stripped:
-            continue
-        urls.append(stripped)
-    if not urls:
-        raise ValueError("no URLs provided")
-    return urls
-
-
-def _collect_url_lists(paths: Sequence[str]) -> List[str]:
-    urls: List[str] = []
-    for path in paths:
-        urls.extend(_read_url_list(path))
-    if not urls:
-        raise ValueError("no URLs provided")
-    return urls
-
-
-def _slugify_url(url: str) -> str:
-    parsed = urlparse(url)
-    host = parsed.netloc or ""
-    path = parsed.path or ""
-    if parsed.query:
-        path = f"{path}?{parsed.query}"
-    raw = f"{host}{path}" if host or path else url
-    raw = unquote(raw).strip().strip("/")
-    if not raw:
-        raw = host or "url"
-    slug = re.sub(r"[^A-Za-z0-9]+", "-", raw).strip("-").lower()
-    if not slug:
-        slug = "url"
-    return slug[:120].strip("-") or "url"
-
-
-def _build_batch_out_path(
-    out_dir: str, url: str, index: int, used_names: Set[str]
-) -> str:
-    slug = _slugify_url(url)
-    name = f"{index:03d}-{slug}.md"
-    if name in used_names:
-        counter = 2
-        while name in used_names:
-            name = f"{index:03d}-{slug}-{counter}.md"
-            counter += 1
-    used_names.add(name)
-    return os.path.join(out_dir, name)
-
-
-def _require_out_dir(out_dir: str) -> str:
-    if not out_dir:
-        raise ValueError("output directory is required")
-    os.makedirs(out_dir, exist_ok=True)
-    if not os.path.isdir(out_dir):
-        raise FileNotFoundError(f"output directory is not usable: {out_dir}")
-    return out_dir
-
-
-def atomic_write_text(out_path: str, content: str) -> None:
-    if not out_path:
-        raise ValueError("output path is required")
-    out_dir = os.path.dirname(os.path.abspath(out_path)) or "."
-    os.makedirs(out_dir, exist_ok=True)
-    if not os.path.isdir(out_dir):
-        raise FileNotFoundError(f"output directory is not usable: {out_dir}")
-    fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", dir=out_dir)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            _ = handle.write(content)
-        os.replace(tmp_path, out_path)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+from ..markdown.autofix import MarkdownAutofixOptions, autofix_markdown
+from ..markdown.lint import MarkdownLintOptions, format_issue_report, lint_markdown
+from ..markdown.sanitize import sanitize_markdown_input
+from ..io.fs_utils import atomic_write_text, read_text
+from ..core.preservation import PreservationError, protect, restore
+from ..core.step1_profile import profile as profile_step1
+from ..services.translation_runner import (
+    TranslationOptions,
+    collect_url_lists,
+    normalize_urls,
+    require_out_dir,
+    translate_url_to_path,
+    translate_urls_batch,
+)
 
 
 def fetch_url(url: str, jina_api_key_env: Optional[str], timeout: float) -> str:
@@ -170,88 +72,56 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _translation_options_from_args(args: argparse.Namespace) -> TranslationOptions:
+    return TranslationOptions(
+        jina_api_key_env=cast(Optional[str], getattr(args, "jina_api_key_env", None)),
+        timeout=float(cast(float, getattr(args, "timeout", 30.0))),
+        max_chunk_chars=int(cast(int, getattr(args, "max_chunk_chars", 5000))),
+        concurrency=int(cast(int, getattr(args, "concurrency", 2))),
+        snapdown_to_mermaid=not bool(
+            cast(bool, getattr(args, "no_snapdown_mermaid", False))
+        ),
+        prompt_outline_mode=cast(
+            str, getattr(args, "prompt_outline_mode", "headings")
+        ),
+        prompt_glossary_mode=cast(
+            str, getattr(args, "prompt_glossary_mode", "filtered")
+        ),
+        output_format=cast(str, getattr(args, "output_format", "readable")),
+    )
+
+
 def cmd_translate_url(args: argparse.Namespace) -> int:
     url_values = cast(Sequence[str], args.url)
-    urls = _normalize_urls(url_values)
+    urls = normalize_urls(url_values)
     if len(urls) != 1:
         raise ValueError("single-document translation requires exactly one --url value")
     url = urls[0]
     out_path = cast(str, args.out)
-    jina_api_key_env = cast(Optional[str], args.jina_api_key_env)
-    timeout = float(cast(float, args.timeout))
-    max_chunk_chars = int(cast(int, args.max_chunk_chars))
-    concurrency = int(cast(int, args.concurrency))
-    snapdown_to_mermaid = not bool(cast(bool, args.no_snapdown_mermaid))
-    prompt_outline_mode = cast(str, args.prompt_outline_mode)
-    prompt_glossary_mode = cast(str, args.prompt_glossary_mode)
-    output_format = cast(str, args.output_format)
-    if jina_api_key_env:
-        api_key = os.environ.get(jina_api_key_env)
-        if not api_key:
-            raise ValueError(f"missing API key in env var: {jina_api_key_env}")
-        os.environ["JINA_API_KEY"] = api_key
-
-    from .pipeline import translate_document
-
-    _ = translate_document(
-        source_type="url",
-        source_value=url,
+    _ = translate_url_to_path(
+        url=url,
         out_path=out_path,
-        max_chunk_chars=max_chunk_chars,
-        concurrency=concurrency,
-        timeout_seconds=timeout,
-        snapdown_to_mermaid=snapdown_to_mermaid,
-        prompt_outline_mode=prompt_outline_mode,
-        prompt_glossary_mode=prompt_glossary_mode,
-        output_format=output_format,
+        options=_translation_options_from_args(args),
         write_text=atomic_write_text,
     )
     return 0
 
 
 def cmd_translate_url_batch(args: argparse.Namespace) -> int:
-    out_dir = cast(str, args.out_dir)
-    jina_api_key_env = cast(Optional[str], args.jina_api_key_env)
-    timeout = float(cast(float, args.timeout))
-    max_chunk_chars = int(cast(int, args.max_chunk_chars))
-    concurrency = int(cast(int, args.concurrency))
-    snapdown_to_mermaid = not bool(cast(bool, args.no_snapdown_mermaid))
-    prompt_outline_mode = cast(str, args.prompt_outline_mode)
-    prompt_glossary_mode = cast(str, args.prompt_glossary_mode)
-    output_format = cast(str, args.output_format)
-    if jina_api_key_env:
-        api_key = os.environ.get(jina_api_key_env)
-        if not api_key:
-            raise ValueError(f"missing API key in env var: {jina_api_key_env}")
-        os.environ["JINA_API_KEY"] = api_key
-
+    out_dir = require_out_dir(cast(str, args.out_dir))
     urls = _resolve_batch_urls(args)
-    out_dir = _require_out_dir(out_dir)
-
-    from .pipeline import translate_document
-
-    used_names: Set[str] = set()
-    failures: List[str] = []
-    success_count = 0
-    for index, url in enumerate(urls, start=1):
-        out_path = _build_batch_out_path(out_dir, url, index, used_names)
-        try:
-            _ = translate_document(
-                source_type="url",
-                source_value=url,
-                out_path=out_path,
-                max_chunk_chars=max_chunk_chars,
-                concurrency=concurrency,
-                timeout_seconds=timeout,
-                snapdown_to_mermaid=snapdown_to_mermaid,
-                prompt_outline_mode=prompt_outline_mode,
-                prompt_glossary_mode=prompt_glossary_mode,
-                output_format=output_format,
-                write_text=atomic_write_text,
-            )
-            success_count += 1
-        except Exception as exc:
-            failures.append(f"{url} -> {out_path}: {exc}")
+    results = translate_urls_batch(
+        urls=urls,
+        out_dir=out_dir,
+        options=_translation_options_from_args(args),
+        write_text=atomic_write_text,
+    )
+    failures = [
+        f"{result.url} -> {result.out_path}: {result.error}"
+        for result in results
+        if not result.success
+    ]
+    success_count = sum(1 for result in results if result.success)
 
     if failures:
         for line in failures:
@@ -269,7 +139,7 @@ def cmd_translate_md(args: argparse.Namespace) -> int:
     output_format = cast(str, args.output_format)
     title_hint = os.path.basename(input_path)
 
-    from .pipeline import translate_document
+    from ..core.pipeline import translate_document
 
     _ = translate_document(
         source_type="file",
@@ -315,13 +185,25 @@ def _resolve_batch_urls(args: argparse.Namespace) -> List[str]:
     urls: List[str] = []
     inline_values = cast(Sequence[str], getattr(args, "url", []) or [])
     if inline_values:
-        urls.extend(_normalize_urls(inline_values))
+        urls.extend(normalize_urls(inline_values))
     url_list = cast(Sequence[str], getattr(args, "url_list", []) or [])
     if url_list:
-        urls.extend(_collect_url_lists(url_list))
+        urls.extend(collect_url_lists(url_list))
     if not urls:
         raise ValueError("no URLs provided")
     return urls
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    from ..web.app import serve_app
+
+    serve_app(
+        host=cast(str, args.host),
+        port=int(cast(int, args.port)),
+        job_base_dir=cast(Optional[str], getattr(args, "job_dir", None)),
+        max_workers=int(cast(int, getattr(args, "workers", 2))),
+    )
+    return 0
 
 
 def cmd_lint_md(args: argparse.Namespace) -> int:
@@ -527,6 +409,13 @@ def cmd_debug_profile(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="translator")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    serve = subparsers.add_parser("serve")
+    _ = serve.add_argument("--host", default="127.0.0.1")
+    _ = serve.add_argument("--port", type=int, default=10001)
+    _ = serve.add_argument("--job-dir")
+    _ = serve.add_argument("--workers", type=int, default=2)
+    serve.set_defaults(func=cmd_serve)
 
     translate = subparsers.add_parser("translate")
     source_group = translate.add_mutually_exclusive_group(required=True)

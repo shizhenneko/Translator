@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple, cast
 
 from openai.types.chat import ChatCompletionMessageParam
 
-from .llm_client import KimiClient
+from ..llm.client import KimiClient
 from .validation import (
     require_bool,
     require_dict,
