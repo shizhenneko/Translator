@@ -19,11 +19,11 @@ def sample_fixture():
 
 
 @pytest.mark.skipif(
-    not os.environ.get("MOONSHOT_API_KEY"),
-    reason="MOONSHOT_API_KEY not set - skipping integration test",
+    not (os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("MOONSHOT_API_KEY")),
+    reason="DEEPSEEK_API_KEY not set - skipping integration test",
 )
 def test_end_to_end_translation(sample_fixture, tmp_path):
-    """Test end-to-end translation with real API (requires MOONSHOT_API_KEY)."""
+    """Test end-to-end translation with real API (requires DEEPSEEK_API_KEY)."""
     # Create a temporary input file
     input_file = tmp_path / "input.md"
     input_file.write_text(sample_fixture, encoding="utf-8")

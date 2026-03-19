@@ -23,10 +23,14 @@ _CODE_FENCE_RE = re.compile(
     r"^\s*```(?:json)?\s*\n(.*?)\n\s*```\s*$",
     re.DOTALL,
 )
-_DEFAULT_MODEL = "kimi-k2-0905-preview"
-_DEFAULT_BASE_URL = "https://api.moonshot.cn/v1"
-_MODEL_ENV = "MOONSHOT_MODEL"
-_BASE_URL_ENV = "MOONSHOT_BASE_URL"
+_DEFAULT_MODEL = "deepseek-chat"
+_DEFAULT_BASE_URL = "https://api.deepseek.com"
+_PRIMARY_API_KEY_ENV = "DEEPSEEK_API_KEY"
+_PRIMARY_MODEL_ENV = "DEEPSEEK_MODEL"
+_PRIMARY_BASE_URL_ENV = "DEEPSEEK_BASE_URL"
+_LEGACY_API_KEY_ENV = "MOONSHOT_API_KEY"
+_LEGACY_MODEL_ENV = "MOONSHOT_MODEL"
+_LEGACY_BASE_URL_ENV = "MOONSHOT_BASE_URL"
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +67,7 @@ def _log_llm_retry(retry_state, model: str) -> None:
 class KimiClient:
     def __init__(
         self,
-        api_key_env: str = "MOONSHOT_API_KEY",
+        api_key_env: str = _PRIMARY_API_KEY_ENV,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
         timeout: float = 180.0,
@@ -71,16 +75,24 @@ class KimiClient:
         max_backoff: float = 20.0,
     ) -> None:
         api_key = os.environ.get(api_key_env)
+        if not api_key and api_key_env == _PRIMARY_API_KEY_ENV:
+            api_key = os.environ.get(_LEGACY_API_KEY_ENV)
+            if api_key:
+                api_key_env = _LEGACY_API_KEY_ENV
         if not api_key:
             raise ValueError(f"missing API key in env var: {api_key_env}")
-        env_base_url = os.environ.get(_BASE_URL_ENV)
+        env_base_url = os.environ.get(_PRIMARY_BASE_URL_ENV) or os.environ.get(
+            _LEGACY_BASE_URL_ENV
+        )
         resolved_base_url = (
             base_url
             or (env_base_url.strip() if env_base_url else None)
             or _DEFAULT_BASE_URL
         )
         self._client: OpenAI = OpenAI(api_key=api_key, base_url=resolved_base_url)
-        env_model = os.environ.get(_MODEL_ENV)
+        env_model = os.environ.get(_PRIMARY_MODEL_ENV) or os.environ.get(
+            _LEGACY_MODEL_ENV
+        )
         resolved_model = (
             model or (env_model.strip() if env_model else None) or _DEFAULT_MODEL
         )

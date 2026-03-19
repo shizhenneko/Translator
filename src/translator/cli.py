@@ -46,6 +46,18 @@ def _read_url_list(path: str) -> List[str]:
     return urls
 
 
+def _normalize_urls(values: Sequence[str]) -> List[str]:
+    urls: List[str] = []
+    for value in values:
+        stripped = value.strip()
+        if not stripped:
+            continue
+        urls.append(stripped)
+    if not urls:
+        raise ValueError("no URLs provided")
+    return urls
+
+
 def _collect_url_lists(paths: Sequence[str]) -> List[str]:
     urls: List[str] = []
     for path in paths:
@@ -88,8 +100,9 @@ def _build_batch_out_path(
 def _require_out_dir(out_dir: str) -> str:
     if not out_dir:
         raise ValueError("output directory is required")
+    os.makedirs(out_dir, exist_ok=True)
     if not os.path.isdir(out_dir):
-        raise FileNotFoundError(f"output directory does not exist: {out_dir}")
+        raise FileNotFoundError(f"output directory is not usable: {out_dir}")
     return out_dir
 
 
@@ -97,8 +110,9 @@ def atomic_write_text(out_path: str, content: str) -> None:
     if not out_path:
         raise ValueError("output path is required")
     out_dir = os.path.dirname(os.path.abspath(out_path)) or "."
+    os.makedirs(out_dir, exist_ok=True)
     if not os.path.isdir(out_dir):
-        raise FileNotFoundError(f"output directory does not exist: {out_dir}")
+        raise FileNotFoundError(f"output directory is not usable: {out_dir}")
     fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", dir=out_dir)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
@@ -134,8 +148,8 @@ def fetch_url(url: str, jina_api_key_env: Optional[str], timeout: float) -> str:
 def add_common_options(parser: argparse.ArgumentParser) -> None:
     _ = parser.add_argument("--jina-api-key-env", default=None)
     _ = parser.add_argument("--timeout", type=float, default=30.0)
-    _ = parser.add_argument("--max-chunk-chars", type=int, default=8000)
-    _ = parser.add_argument("--concurrency", type=int, default=1)
+    _ = parser.add_argument("--max-chunk-chars", type=int, default=5000)
+    _ = parser.add_argument("--concurrency", type=int, default=2)
     _ = parser.add_argument(
         "--prompt-outline-mode",
         choices=["headings", "full"],
@@ -148,10 +162,20 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
         default="filtered",
         help="Glossary mode: 'filtered' (chunk-relevant terms only) or 'full' (all terms)",
     )
+    _ = parser.add_argument(
+        "--output-format",
+        choices=["readable", "analysis"],
+        default="readable",
+        help="Output rendering mode: 'readable' (default) or 'analysis'",
+    )
 
 
 def cmd_translate_url(args: argparse.Namespace) -> int:
-    url = cast(str, args.url)
+    url_values = cast(Sequence[str], args.url)
+    urls = _normalize_urls(url_values)
+    if len(urls) != 1:
+        raise ValueError("single-document translation requires exactly one --url value")
+    url = urls[0]
     out_path = cast(str, args.out)
     jina_api_key_env = cast(Optional[str], args.jina_api_key_env)
     timeout = float(cast(float, args.timeout))
@@ -160,6 +184,7 @@ def cmd_translate_url(args: argparse.Namespace) -> int:
     snapdown_to_mermaid = not bool(cast(bool, args.no_snapdown_mermaid))
     prompt_outline_mode = cast(str, args.prompt_outline_mode)
     prompt_glossary_mode = cast(str, args.prompt_glossary_mode)
+    output_format = cast(str, args.output_format)
     if jina_api_key_env:
         api_key = os.environ.get(jina_api_key_env)
         if not api_key:
@@ -178,13 +203,13 @@ def cmd_translate_url(args: argparse.Namespace) -> int:
         snapdown_to_mermaid=snapdown_to_mermaid,
         prompt_outline_mode=prompt_outline_mode,
         prompt_glossary_mode=prompt_glossary_mode,
+        output_format=output_format,
         write_text=atomic_write_text,
     )
     return 0
 
 
 def cmd_translate_url_batch(args: argparse.Namespace) -> int:
-    url_list = cast(Sequence[str], args.url_list)
     out_dir = cast(str, args.out_dir)
     jina_api_key_env = cast(Optional[str], args.jina_api_key_env)
     timeout = float(cast(float, args.timeout))
@@ -193,19 +218,21 @@ def cmd_translate_url_batch(args: argparse.Namespace) -> int:
     snapdown_to_mermaid = not bool(cast(bool, args.no_snapdown_mermaid))
     prompt_outline_mode = cast(str, args.prompt_outline_mode)
     prompt_glossary_mode = cast(str, args.prompt_glossary_mode)
+    output_format = cast(str, args.output_format)
     if jina_api_key_env:
         api_key = os.environ.get(jina_api_key_env)
         if not api_key:
             raise ValueError(f"missing API key in env var: {jina_api_key_env}")
         os.environ["JINA_API_KEY"] = api_key
 
-    urls = _collect_url_lists(url_list)
+    urls = _resolve_batch_urls(args)
     out_dir = _require_out_dir(out_dir)
 
     from .pipeline import translate_document
 
     used_names: Set[str] = set()
     failures: List[str] = []
+    success_count = 0
     for index, url in enumerate(urls, start=1):
         out_path = _build_batch_out_path(out_dir, url, index, used_names)
         try:
@@ -219,16 +246,17 @@ def cmd_translate_url_batch(args: argparse.Namespace) -> int:
                 snapdown_to_mermaid=snapdown_to_mermaid,
                 prompt_outline_mode=prompt_outline_mode,
                 prompt_glossary_mode=prompt_glossary_mode,
+                output_format=output_format,
                 write_text=atomic_write_text,
             )
+            success_count += 1
         except Exception as exc:
             failures.append(f"{url} -> {out_path}: {exc}")
 
     if failures:
         for line in failures:
             print(f"error: {line}", file=sys.stderr)
-        return 1
-    return 0
+    return 0 if success_count > 0 else 1
 
 
 def cmd_translate_md(args: argparse.Namespace) -> int:
@@ -238,6 +266,7 @@ def cmd_translate_md(args: argparse.Namespace) -> int:
     concurrency = int(cast(int, args.concurrency))
     prompt_outline_mode = cast(str, args.prompt_outline_mode)
     prompt_glossary_mode = cast(str, args.prompt_glossary_mode)
+    output_format = cast(str, args.output_format)
     title_hint = os.path.basename(input_path)
 
     from .pipeline import translate_document
@@ -251,9 +280,48 @@ def cmd_translate_md(args: argparse.Namespace) -> int:
         title_hint=title_hint,
         prompt_outline_mode=prompt_outline_mode,
         prompt_glossary_mode=prompt_glossary_mode,
+        output_format=output_format,
         write_text=atomic_write_text,
     )
     return 0
+
+
+def cmd_translate(args: argparse.Namespace) -> int:
+    url_values = cast(Sequence[str], getattr(args, "url", []) or [])
+    input_path = cast(Optional[str], getattr(args, "input_path", None))
+    url_list = cast(Optional[Sequence[str]], getattr(args, "url_list", None))
+    urls = [value.strip() for value in url_values if value.strip()]
+    if url_list or len(urls) > 1:
+        out_dir = cast(Optional[str], getattr(args, "out_dir", None))
+        out_path = cast(Optional[str], getattr(args, "out", None))
+        if out_path and not out_dir:
+            args.out_dir = out_path
+        if not cast(Optional[str], getattr(args, "out_dir", None)):
+            raise ValueError("batch translation requires --out-dir (or use --out as the batch directory)")
+        return cmd_translate_url_batch(args)
+    out_path = cast(Optional[str], getattr(args, "out", None))
+    if not out_path:
+        raise ValueError("--out is required for single-document translation")
+    if bool(urls) == bool(input_path):
+        raise ValueError("exactly one of --url or --in is required unless batch URL mode is used")
+    if urls:
+        args.url = urls
+        return cmd_translate_url(args)
+    args.input_path = cast(str, input_path)
+    return cmd_translate_md(args)
+
+
+def _resolve_batch_urls(args: argparse.Namespace) -> List[str]:
+    urls: List[str] = []
+    inline_values = cast(Sequence[str], getattr(args, "url", []) or [])
+    if inline_values:
+        urls.extend(_normalize_urls(inline_values))
+    url_list = cast(Sequence[str], getattr(args, "url_list", []) or [])
+    if url_list:
+        urls.extend(_collect_url_lists(url_list))
+    if not urls:
+        raise ValueError("no URLs provided")
+    return urls
 
 
 def cmd_lint_md(args: argparse.Namespace) -> int:
@@ -460,16 +528,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="translator")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    translate = subparsers.add_parser("translate")
+    source_group = translate.add_mutually_exclusive_group(required=True)
+    _ = source_group.add_argument("--url", action="append")
+    _ = source_group.add_argument("--in", dest="input_path")
+    _ = source_group.add_argument("--url-list", "--url-file", dest="url_list", action="append")
+    _ = translate.add_argument("--out")
+    _ = translate.add_argument("--out-dir")
+    _ = translate.add_argument("--no-snapdown-mermaid", action="store_true")
+    add_common_options(translate)
+    translate.set_defaults(func=cmd_translate)
+
     translate_url = subparsers.add_parser("translate-url")
-    _ = translate_url.add_argument("--url", required=True)
+    _ = translate_url.add_argument("--url", action="append", required=True)
     _ = translate_url.add_argument("--out", required=True)
     _ = translate_url.add_argument("--no-snapdown-mermaid", action="store_true")
     add_common_options(translate_url)
     translate_url.set_defaults(func=cmd_translate_url)
 
     translate_url_batch = subparsers.add_parser("translate-url-batch")
+    _ = translate_url_batch.add_argument("--url", action="append", default=[])
     _ = translate_url_batch.add_argument(
-        "--url-list", "--url-file", dest="url_list", action="append", required=True
+        "--url-list", "--url-file", dest="url_list", action="append"
     )
     _ = translate_url_batch.add_argument("--out-dir", required=True)
     _ = translate_url_batch.add_argument("--no-snapdown-mermaid", action="store_true")

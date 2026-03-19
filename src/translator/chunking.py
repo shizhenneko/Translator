@@ -34,7 +34,12 @@ _HEADING_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+")
 _BLANK_LINE_RE = re.compile(r"(?:\r?\n[ \t]*){2,}")
 
 
-def build_chunk_plan(text: str, max_chunk_chars: int) -> List[ChunkPlanEntry]:
+def build_chunk_plan(
+    text: str,
+    max_chunk_chars: int,
+    *,
+    merge_small_sections: bool = False,
+) -> List[ChunkPlanEntry]:
     if max_chunk_chars <= 0:
         raise ValueError("max-chunk-chars must be positive")
     if not text:
@@ -43,12 +48,19 @@ def build_chunk_plan(text: str, max_chunk_chars: int) -> List[ChunkPlanEntry]:
     protected_spans = find_protected_spans(text)
     sections = _split_by_headings(text, protected_spans)
     drafts: List[_ChunkDraft] = []
+    all_segments: List[_Segment] = []
 
     for section in sections:
         segments = _split_section_segments(
             section.text, section.start, protected_spans, max_chunk_chars
         )
-        drafts.extend(_pack_segments(segments, max_chunk_chars))
+        if merge_small_sections:
+            all_segments.extend(segments)
+        else:
+            drafts.extend(_pack_segments(segments, max_chunk_chars))
+
+    if merge_small_sections:
+        drafts = _pack_segments(all_segments, max_chunk_chars)
 
     return _assign_chunk_ids(drafts)
 

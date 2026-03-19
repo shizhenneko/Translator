@@ -82,6 +82,7 @@ def lint_markdown(
     current_fence_list_depth = 0
     last_nonblank_kind = "other"
     list_stack: List[_ListContext] = []
+    previous_line_blank = False
 
     for line_no, line in enumerate(lines, start=1):
         if in_fence:
@@ -100,9 +101,13 @@ def lint_markdown(
                         else:
                             last_nonblank_kind = "fence_close"
                     current_fence_list_depth = 0
+                    previous_line_blank = False
                     continue
             if line.strip():
                 last_nonblank_kind = "fence_body"
+                previous_line_blank = False
+            else:
+                previous_line_blank = True
             continue
 
         list_match = _LIST_ITEM_RE.match(line)
@@ -135,6 +140,7 @@ def lint_markdown(
                 line_no=line_no,
                 line=line,
                 options=resolved,
+                previous_line_blank=previous_line_blank,
             )
         elif line.strip() and not fence_start_match:
             line_indent = _leading_indent_width(line)
@@ -151,6 +157,9 @@ def lint_markdown(
                             excerpt=_excerpt(line),
                         )
                     )
+            previous_line_blank = False
+        elif not line.strip():
+            previous_line_blank = True
 
         inline_mask = _inline_code_mask(line)
         for token_match in _FENCE_TOKEN_RE.finditer(line):
@@ -278,6 +287,7 @@ def lint_markdown(
                 last_nonblank_kind = "list_content"
             else:
                 last_nonblank_kind = "other"
+            previous_line_blank = False
 
     if in_fence:
         issues.append(
@@ -375,6 +385,7 @@ def _update_list_stack(
     line_no: int,
     line: str,
     options: MarkdownLintOptions,
+    previous_line_blank: bool,
 ) -> List[_ListContext]:
     updated = list(list_stack)
     item_indent = _indent_width(list_match.group("indent"))
@@ -385,7 +396,11 @@ def _update_list_stack(
 
     if updated and item_indent == updated[-1].indent:
         previous = updated[-1]
-        if options.strict_renderer and previous.marker_kind != marker_kind:
+        if (
+            options.strict_renderer
+            and previous.marker_kind != marker_kind
+            and not previous_line_blank
+        ):
             issues.append(
                 MarkdownIssue(
                     rule_id=RULE_LIST_CONTEXT_DRIFT,

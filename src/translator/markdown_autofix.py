@@ -38,6 +38,7 @@ def autofix_markdown(
     fixed = _repair_inline_fence_sequences(fixed)
     fixed = _split_inline_list_fences(fixed)
     fixed = _normalize_list_fence_indentation(fixed)
+    fixed = _normalize_list_followup_indentation(fixed)
     fixed = _replace_prose_triple_backticks(fixed)
     if resolved.strict_renderer:
         fixed = _stabilize_risky_list_fences(
@@ -228,6 +229,97 @@ def _normalize_list_fence_indentation(markdown: str) -> str:
 
     joined = "\n".join(fixed)
     return _restore_terminal_newline(markdown, joined)
+
+
+def _normalize_list_followup_indentation(markdown: str) -> str:
+    lines = markdown.splitlines()
+    if not lines:
+        return markdown
+
+    fixed = list(lines)
+    list_stack: List[Tuple[int, str]] = []
+    index = 0
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+    last_fence_list_indent: Optional[int] = None
+
+    while index < len(fixed):
+        line = fixed[index]
+
+        if in_fence:
+            close_match = _FENCE_ONLY_RE.match(line)
+            if close_match:
+                close = close_match.group("fence")
+                if close and close[0] == fence_char and len(close) >= fence_len:
+                    in_fence = False
+                    fence_char = ""
+                    fence_len = 0
+            index += 1
+            continue
+
+        list_match = _LIST_ITEM_RE.match(line)
+        if list_match:
+            indent = _indent_width(list_match.group("indent"))
+            list_stack = [item for item in list_stack if item[0] < indent]
+            list_stack.append((indent, list_match.group("marker")))
+            last_fence_list_indent = None
+            index += 1
+            continue
+
+        opening_match = _FENCE_START_RE.match(line)
+        if opening_match:
+            opening = opening_match.group("fence")
+            fence_indent = _indent_width(opening_match.group("indent"))
+            list_depth = _list_depth_for_indent_from_stack(list_stack, fence_indent)
+            if list_depth == 0 and list_stack:
+                list_depth = len(list_stack)
+            if list_depth > 0:
+                last_fence_list_indent = list_stack[list_depth - 1][0] + 4
+            else:
+                last_fence_list_indent = None
+            if opening:
+                in_fence = True
+                fence_char = opening[0]
+                fence_len = len(opening)
+            index += 1
+            continue
+
+        if line.strip():
+            line_indent = _indent_width(line[: len(line) - len(line.lstrip(" \t"))])
+            if list_stack:
+                while list_stack and line_indent <= list_stack[-1][0]:
+                    list_stack.pop()
+
+        if (
+            last_fence_list_indent is not None
+            and line.strip()
+            and not _FENCE_START_RE.match(line)
+            and not _LIST_ITEM_RE.match(line)
+        ):
+            prefix_len = len(line) - len(line.lstrip(" \t"))
+            current_indent = _indent_width(line[:prefix_len])
+            if 0 < current_indent < last_fence_list_indent:
+                fixed[index] = (" " * last_fence_list_indent) + line.lstrip(" \t")
+            last_fence_list_indent = None
+        elif line.strip():
+            last_fence_list_indent = None
+
+        index += 1
+
+    joined = "\n".join(fixed)
+    return _restore_terminal_newline(markdown, joined)
+
+
+def _list_depth_for_indent_from_stack(
+    list_stack: Sequence[Tuple[int, str]], indent: int
+) -> int:
+    depth = 0
+    for stack_indent, _marker in list_stack:
+        content_indent = stack_indent + 4
+        if indent >= content_indent:
+            depth += 1
+    return depth
 
 
 def _replace_prose_triple_backticks(markdown: str) -> str:

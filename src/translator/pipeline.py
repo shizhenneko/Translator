@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Sequence, cast
 
 from .chunking import ChunkPlanEntry, build_chunk_plan
 from .llm_client import KimiClient
 from .snapdown_converter import convert_snapdown_to_mermaid
-from .step1_profile import profile as profile_step1
+from .step1_profile import build_lightweight_profile, profile as profile_step1
 from .validation import (
     require_bool,
     require_dict,
@@ -27,7 +29,10 @@ from .jina_reader_fetcher import (
 )
 from .markdown_autofix import MarkdownAutofixOptions, autofix_markdown
 from .markdown_lint import MarkdownLintOptions, format_issue_report, lint_markdown
+from .markdown_normalize import normalize_markdown_for_preview
 from .markdown_sanitize import sanitize_markdown_input
+
+logger = logging.getLogger(__name__)
 
 
 class PipelineError(RuntimeError):
@@ -46,6 +51,7 @@ def translate_document(
     snapdown_to_mermaid: bool = True,
     prompt_outline_mode: str = "headings",
     prompt_glossary_mode: str = "filtered",
+    output_format: str = "readable",
     client: Optional[KimiClient] = None,
     write_text: Optional[Callable[[str, str], None]] = None,
 ) -> str:
@@ -53,6 +59,14 @@ def translate_document(
         raise PipelineError("source_type must be 'url' or 'file'")
     if not source_value:
         raise PipelineError("source_value is required")
+    if output_format not in {"readable", "analysis"}:
+        raise PipelineError("output_format must be 'readable' or 'analysis'")
+
+    effective_outline_mode = prompt_outline_mode
+    effective_glossary_mode = prompt_glossary_mode
+    if output_format == "readable":
+        effective_outline_mode = "headings"
+        effective_glossary_mode = "filtered"
 
     llm_client = client or KimiClient()
     content = _read_source(
@@ -64,14 +78,25 @@ def translate_document(
     )
     content = sanitize_markdown_input(content, aggressive=True)
     content = _clean_jina_artifacts(content)
+    content = normalize_markdown_for_preview(content, source_type=source_type)
+    content = autofix_markdown(content, options=_guardrail_options()[0])
     model_id = cast(str, getattr(llm_client, "_model", "unknown"))
 
-    profile_payload, _ = profile_step1(
+    profile_started = time.perf_counter()
+    profile_payload, _ = _build_profile_payload(
         content=content,
         source_type=source_type,
         source_value=source_value,
         title_hint=title_hint,
+        output_format=output_format,
         client=llm_client,
+    )
+    _log_stage_duration(
+        "profile",
+        profile_started,
+        source_type=source_type,
+        source_value=source_value,
+        output_format=output_format,
     )
 
     outline = _require_list(profile_payload.get("outline"), "outline")
@@ -82,16 +107,41 @@ def translate_document(
         profile_payload, source_value=source_value, title_hint=title_hint
     )
 
-    chunks = build_chunk_plan(content, max_chunk_chars)
-    translations = translate_chunks(
-        chunks,
-        cast(Sequence[Dict[str, object]], outline),
-        cast(Sequence[Dict[str, object]], glossary),
+    chunk_started = time.perf_counter()
+    chunks = _build_chunks(
+        content=content,
+        max_chunk_chars=max_chunk_chars,
+        merge_small_sections=(output_format == "readable"),
+    )
+    _log_stage_duration(
+        "chunk_plan",
+        chunk_started,
+        source_type=source_type,
+        source_value=source_value,
+        chunks=len(chunks),
+        max_chunk_chars=max_chunk_chars,
+        merge_small_sections=(output_format == "readable"),
+    )
+    translate_started = time.perf_counter()
+    translations = _translate_chunks(
+        chunks=chunks,
+        outline=cast(Sequence[Dict[str, object]], outline),
+        glossary=cast(Sequence[Dict[str, object]], glossary),
         client=llm_client,
         concurrency=concurrency,
         style_rules=style_rules,
-        prompt_outline_mode=prompt_outline_mode,
-        glossary_mode=prompt_glossary_mode,
+        prompt_outline_mode=effective_outline_mode,
+        glossary_mode=effective_glossary_mode,
+        output_format=output_format,
+    )
+    _log_stage_duration(
+        "translate_chunks",
+        translate_started,
+        source_type=source_type,
+        source_value=source_value,
+        chunks=len(chunks),
+        concurrency=concurrency,
+        output_format=output_format,
     )
 
     output = _assemble_output(
@@ -103,12 +153,111 @@ def translate_document(
         glossary=cast(Sequence[Dict[str, object]], glossary),
         translations=translations,
         chunks=chunks,
+        output_format=output_format,
     )
-    output = enforce_markdown_guardrails(output)
+    output = enforce_markdown_guardrails(
+        output,
+        title=doc_title,
+        source_type=source_type,
+    )
     if write_text is None:
         raise PipelineError("write_text callback is required")
     write_text(out_path, output)
     return output
+
+
+def _build_profile_payload(
+    *,
+    content: str,
+    source_type: str,
+    source_value: str,
+    title_hint: Optional[str],
+    output_format: str,
+    client: KimiClient,
+) -> tuple[Dict[str, object], str]:
+    if output_format == "readable":
+        return build_lightweight_profile(
+            content=content,
+            source_type=source_type,
+            source_value=source_value,
+            title_hint=title_hint,
+        )
+    return profile_step1(
+        content=content,
+        source_type=source_type,
+        source_value=source_value,
+        title_hint=title_hint,
+        client=client,
+    )
+
+
+def _build_chunks(
+    *,
+    content: str,
+    max_chunk_chars: int,
+    merge_small_sections: bool,
+) -> List[ChunkPlanEntry]:
+    try:
+        return build_chunk_plan(
+            content,
+            max_chunk_chars,
+            merge_small_sections=merge_small_sections,
+        )
+    except TypeError as exc:
+        if "merge_small_sections" not in str(exc):
+            raise
+        return build_chunk_plan(content, max_chunk_chars)
+
+
+def _translate_chunks(
+    *,
+    chunks: Sequence[ChunkPlanEntry],
+    outline: Sequence[Dict[str, object]],
+    glossary: Sequence[Dict[str, object]],
+    client: KimiClient,
+    concurrency: int,
+    style_rules: Sequence[str],
+    prompt_outline_mode: str,
+    glossary_mode: str,
+    output_format: str,
+) -> List[ChunkTranslation]:
+    try:
+        return translate_chunks(
+            chunks,
+            outline,
+            glossary,
+            client=client,
+            concurrency=concurrency,
+            style_rules=style_rules,
+            prompt_outline_mode=prompt_outline_mode,
+            glossary_mode=glossary_mode,
+            output_format=output_format,
+        )
+    except TypeError as exc:
+        if "output_format" not in str(exc):
+            raise
+        return translate_chunks(
+            chunks,
+            outline,
+            glossary,
+            client=client,
+            concurrency=concurrency,
+            style_rules=style_rules,
+            prompt_outline_mode=prompt_outline_mode,
+            glossary_mode=glossary_mode,
+        )
+
+
+def _log_stage_duration(
+    stage: str,
+    started_at: float,
+    **metadata: object,
+) -> None:
+    if os.getenv("TRANSLATOR_TIMING_LOG", "1") == "0":
+        return
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    meta = " ".join(f"{key}={value}" for key, value in metadata.items())
+    logger.warning("pipeline_timing stage=%s elapsed_ms=%s %s", stage, elapsed_ms, meta)
 
 
 def _read_source(
@@ -167,29 +316,57 @@ def _assemble_output(
     glossary: Sequence[Dict[str, object]],
     translations: Sequence[ChunkTranslation],
     chunks: Sequence[ChunkPlanEntry],
+    output_format: str = "readable",
 ) -> str:
     title_md = _render_title(title)
-    meta = _render_meta(
-        source_type=source_type, source_value=source_value, model_id=model_id
-    )
-    outline_md = _render_outline(outline)
-    glossary_md = _render_glossary(glossary)
     body = _merge_translations(translations, chunks)
+    source_line = _render_source_line(source_type=source_type, source_value=source_value)
 
-    sections = [title_md, meta, outline_md, glossary_md, body]
+    if output_format == "analysis":
+        meta = _render_meta(
+            source_type=source_type, source_value=source_value, model_id=model_id
+        )
+        outline_md = _render_outline(outline)
+        glossary_md = _render_glossary(glossary)
+        sections = [title_md, meta, outline_md, glossary_md, body]
+    else:
+        sections = [title_md, source_line, body]
     normalized = [section.strip("\n") for section in sections]
     output = "\n\n".join(normalized).rstrip() + "\n"
-    return _fix_heading_collisions(output)
+    return normalize_markdown_for_preview(
+        output,
+        title=title,
+        source_type=source_type,
+    )
 
 
-def enforce_markdown_guardrails(markdown: str) -> str:
+def enforce_markdown_guardrails(
+    markdown: str,
+    *,
+    title: Optional[str] = None,
+    source_type: Optional[str] = None,
+) -> str:
     autofix_options, lint_options = _guardrail_options()
-    fixed = autofix_markdown(markdown, options=autofix_options)
+    fixed = sanitize_markdown_input(markdown, aggressive=True)
+    fixed = normalize_markdown_for_preview(
+        fixed,
+        title=title,
+        source_type=source_type,
+    )
+    fixed = autofix_markdown(fixed, options=autofix_options)
     issues = lint_markdown(fixed, options=lint_options)
     if issues:
         # Retry once after aggressive stabilization to keep pipeline fail-safe.
-        fixed = autofix_markdown(fixed, options=autofix_options)
-        issues = lint_markdown(fixed, options=lint_options)
+        retried = normalize_markdown_for_preview(
+            fixed,
+            title=title,
+            source_type=source_type,
+        )
+        retried = autofix_markdown(retried, options=autofix_options)
+        retried_issues = lint_markdown(retried, options=lint_options)
+        if len(retried_issues) <= len(issues):
+            fixed = retried
+            issues = retried_issues
     if issues:
         report = format_issue_report(issues)
         raise PipelineError(f"markdown guardrails failed:\n{report}")
@@ -274,44 +451,16 @@ def _render_meta(*, source_type: str, source_value: str, model_id: str) -> str:
     return "\n".join(lines)
 
 
+def _render_source_line(*, source_type: str, source_value: str) -> str:
+    return f"Source: {source_type} {source_value}"
+
+
 def _render_title(title: str) -> str:
     compact = re.sub(r"\s+", " ", title).strip()
     compact = compact.lstrip("#").strip()
     if not compact:
         compact = "Document"
     return f"# {compact}"
-
-
-def _fix_heading_collisions(text: str) -> str:
-    text = re.sub(
-        r"^([=]{3,}|[-]{3,})\s*(#{1,6}\s+)",
-        r"\1\n\2",
-        text,
-        flags=re.MULTILINE,
-    )
-    text = re.sub(
-        r"^(>[^\n]*?)(#{1,6}\s+)",
-        r"\1\n\2",
-        text,
-        flags=re.MULTILINE,
-    )
-    text = re.sub(
-        r"^([ \t]*[-*+]\s+[^\n]*?)(#{1,6}\s+)",
-        r"\1\n\2",
-        text,
-        flags=re.MULTILINE,
-    )
-    text = re.sub(
-        r"^([ \t]*\d+[.)]\s+[^\n]*?)(#{1,6}\s+)",
-        r"\1\n\2",
-        text,
-        flags=re.MULTILINE,
-    )
-    return re.sub(
-        r"([.!?。！？\]\)])\s*(#{2,6}\s+)",
-        r"\1\n\2",
-        text,
-    )
 
 
 def _render_outline(outline: Sequence[Dict[str, object]]) -> str:

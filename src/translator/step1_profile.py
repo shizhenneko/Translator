@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from typing import Dict, List, Optional, Tuple, cast
 
 from openai.types.chat import ChatCompletionMessageParam
@@ -50,10 +52,56 @@ _PROFILE_SCHEMA_EXAMPLE = json.dumps(
 )
 
 _SOURCE_TYPES = {"url", "file"}
+_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)\s*$", re.MULTILINE)
+_MAX_LIGHTWEIGHT_OUTLINE_ITEMS = 24
+_DEFAULT_STYLE_RULES = [
+    "Keep commands, flags, filenames, class names, and API identifiers in English.",
+    "Use concise, accurate Chinese suitable for course notes.",
+    "Preserve heading hierarchy, list structure, links, and examples.",
+    "For course handouts, prefer translating 'spec' or 'specification' as '规范' rather than '说明' when context fits.",
+    "Add brief study annotations only when they clarify a difficult idea.",
+]
 
 
 class ProfileError(RuntimeError):
     pass
+
+
+def build_lightweight_profile(
+    content: str,
+    source_type: str,
+    source_value: str,
+    title_hint: Optional[str] = None,
+    source_language: str = "en",
+    target_language: str = "zh-CN",
+) -> Tuple[Dict[str, object], str]:
+    if not content:
+        raise ProfileError("content is required")
+    if source_type not in _SOURCE_TYPES:
+        raise ProfileError("source_type must be 'url' or 'file'")
+    if not source_value:
+        raise ProfileError("source_value is required")
+
+    payload: Dict[str, object] = {
+        "doc": {
+            "title": _extract_lightweight_title(
+                content=content,
+                source_value=source_value,
+                title_hint=title_hint,
+            ),
+            "source": {"type": source_type, "value": source_value},
+            "language": {"source": source_language, "target": target_language},
+        },
+        "outline": _extract_lightweight_outline(content),
+        "glossary": [],
+        "style_guide": {
+            "tone": "technical-but-friendly",
+            "annotation_density": "medium",
+            "rules": list(_DEFAULT_STYLE_RULES),
+        },
+    }
+    markdown = render_profile_markdown(payload)
+    return payload, markdown
 
 
 def profile(
@@ -164,6 +212,68 @@ def render_profile_markdown(payload: Dict[str, object]) -> str:
             )
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _extract_lightweight_title(
+    *,
+    content: str,
+    source_value: str,
+    title_hint: Optional[str],
+) -> str:
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        heading_match = re.match(r"^#{1,6}[ \t]+(.+?)\s*$", stripped)
+        if heading_match:
+            candidate = _clean_title_candidate(heading_match.group(1))
+            if candidate:
+                return candidate
+        candidate = _clean_title_candidate(stripped)
+        if candidate and not candidate.startswith("Source: "):
+            return candidate
+    fallback = _fallback_title(source_value, title_hint)
+    return fallback or "Document"
+
+
+def _extract_lightweight_outline(content: str) -> List[Dict[str, object]]:
+    outline: List[Dict[str, object]] = []
+    for match in _HEADING_RE.finditer(content):
+        heading = _clean_title_candidate(match.group(2))
+        if not heading:
+            continue
+        outline.append(
+            {
+                "level": len(match.group(1)),
+                "heading": heading,
+                "summary_bullets": [],
+                "key_takeaways": [],
+            }
+        )
+        if len(outline) >= _MAX_LIGHTWEIGHT_OUTLINE_ITEMS:
+            break
+    return outline
+
+
+def _clean_title_candidate(value: str) -> str:
+    text = re.sub(r"\[(.*?)\]\((.*?)\)", r"\1", value)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"\s+", " ", text).strip().strip("#").strip()
+    return text[:200].strip()
+
+
+def _fallback_title(source_value: str, title_hint: Optional[str]) -> str:
+    if title_hint:
+        base = os.path.splitext(os.path.basename(title_hint))[0].strip()
+        if base:
+            return base
+    if source_value.startswith(("http://", "https://")):
+        trimmed = source_value.rstrip("/").split("/")[-1].strip()
+        if trimmed:
+            return trimmed
+        return "Document"
+    base = os.path.splitext(os.path.basename(source_value))[0].strip()
+    return base or "Document"
 
 
 def _build_profile_messages(
